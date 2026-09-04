@@ -41,8 +41,8 @@ type chatToolFunc struct {
 }
 
 // ChatCompletion posts the request to the route and returns a ChatStream.
-// Both streaming and non-streaming responses are wrapped in the same iterator;
-// non-streaming upstream responses are normalized to a single event.
+// Route isolation: auth route (opencode-zen::) targets the Zen base URL with a
+// Bearer key; public route targets the anonymous base URL with no credentials.
 func (p *Provider) ChatCompletion(ctx context.Context, route model.ProviderRoute, req provider.NormalizedRequest) (provider.ChatStream, error) {
 	pmid := route.ModelID
 	_, mdl, err := pmid.Parse()
@@ -55,12 +55,27 @@ func (p *Provider) ChatCompletion(ctx context.Context, route model.ProviderRoute
 		return nil, err
 	}
 
+	baseURL := p.BaseURL
+	isAuth := strings.HasPrefix(string(route.ID), AuthRouteName+"::")
+	if isAuth {
+		if p.AuthBaseOverride != "" {
+			baseURL = p.AuthBaseOverride
+		} else {
+			baseURL = AuthBaseURL
+		}
+	}
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(p.BaseURL, "/")+"/chat/completions", bytes.NewReader(payload))
+		strings.TrimRight(baseURL, "/")+"/chat/completions", bytes.NewReader(payload))
 	if err != nil {
 		return nil, provider.NewFailureError(model.NewFailure(model.FailureBadRequest, model.ScopeRequest), err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if isAuth {
+		if key := AuthKey(); key != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+key)
+		}
+	}
 
 	resp, err := p.HTTP.Do(httpReq)
 	if err != nil {
@@ -172,8 +187,8 @@ type sseStream struct {
 type sseChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content          string          `json:"content"`
-			ReasoningContent string          `json:"reasoning_content"`
+			Content          string            `json:"content"`
+			ReasoningContent string            `json:"reasoning_content"`
 			ToolCalls        []json.RawMessage `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
@@ -224,9 +239,9 @@ func (s *sseStream) Next(ctx context.Context) (provider.StreamEvent, error) {
 		}
 		c := chunk.Choices[0]
 		ev := provider.StreamEvent{
-			DeltaText:     c.Delta.Content,
+			DeltaText:      c.Delta.Content,
 			ReasoningDelta: c.Delta.ReasoningContent != "",
-			FinishReason:  c.FinishReason,
+			FinishReason:   c.FinishReason,
 		}
 		if len(c.Delta.ToolCalls) > 0 {
 			ev.ToolCallDelta = true

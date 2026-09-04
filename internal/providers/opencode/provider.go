@@ -17,6 +17,8 @@ import (
 type Provider struct {
 	// BaseURL of the OpenAI-compatible endpoint. Settable for tests.
 	BaseURL string
+	// AuthBaseOverride overrides the Zen auth base URL (tests only).
+	AuthBaseOverride string
 	// HTTP client used for all calls.
 	HTTP *http.Client
 	// DefaultAccess assigned to discovered models (Public route => Free).
