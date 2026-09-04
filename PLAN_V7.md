@@ -1,21 +1,54 @@
-# Auto Free Models — PLAN V7
+# Free-Model-Router — PLAN V7.1.1
 
-> 상태: **Phased Build & Validation Plan**
+> 상태: \*\*Phased Build \& Validation Plan\*\*
 >
 > 목표:
 >
-> **무료/무료티어 LLM을 자동 탐색하고, capability + performance + TTFT + health를 기준으로 최적 모델을 선택·fallback하는 Go 기반 로컬 AI gateway와 Tauri desktop UI를 단계적으로 구축한다.**
+> \*\*무료/무료티어 LLM을 자동 탐색하고, capability + performance + TTFT + health를 기준으로 최적 모델을 선택·fallback하는 Go 기반 로컬 AI gateway와 Tauri desktop UI를 단계적으로 구축한다.\*\*
 >
 > 원칙:
 >
-> - 각 Phase는 **독립적으로 빌드·테스트·판정 가능**해야 한다.
+> - 각 Phase는 \*\*독립적으로 빌드·테스트·판정 가능\*\*해야 한다.
 > - 한 Phase에서 새로운 domain abstraction과 새로운 provider를 동시에 과도하게 추가하지 않는다.
 > - 다음 Phase는 이전 Phase의 gate를 통과한 뒤 진행한다.
 > - Desktop/UI는 core router가 안정된 뒤 시작한다.
 
----
+## Naming Convention
 
-# 1. 최종 구조
+```text
+Project / Repository
+Free-Model-Router / free-model-router
+
+Short name
+FMR
+
+CLI
+fmr
+
+Gateway binary
+fmr-gateway
+
+Virtual auto-routing model
+fmr/auto
+
+Control API prefix
+/\_fmr/
+
+Environment prefix
+FMR\_
+
+Config/data directory
+\~/.free-model-router
+
+Desktop display name
+Free Model Router
+```
+
+코드, 문서, CLI, API에서는 이전 프로젝트 명칭과 약칭을 더 이상 신규 사용하지 않는다.
+
+\---
+
+# 1\. 최종 구조
 
 ```text
 Tauri Desktop
@@ -27,7 +60,7 @@ Tauri Desktop
  Local Control API
           │
           ▼
-     AFM Gateway
+     Free-Model-Router Gateway
         (Go)
           │
           ├─ OpenCode
@@ -44,9 +77,9 @@ omfm
 → reference implementation only
 ```
 
----
+\---
 
-# 2. 핵심 Domain Contract
+# 2\. 핵심 Domain Contract
 
 V7에서 다음 identity를 고정한다.
 
@@ -93,21 +126,21 @@ opencode-zen::mimo-v2.5
 
 RouteID는 내부 diagnostic용이며 외부 `model=` 값으로 사용하지 않는다.
 
----
+\---
 
-# 3. 핵심 정책
+# 3\. 핵심 정책
 
 ## Model Pool
 
 ```text
-[✓] ProviderModel 포함
-[ ] ProviderModel 제외
+\[✓] ProviderModel 포함
+\[ ] ProviderModel 제외
 ```
 
 Source of truth:
 
 ```go
-SelectedProviderModelIDs []ProviderModelID
+SelectedProviderModelIDs \[]ProviderModelID
 ```
 
 지원:
@@ -121,12 +154,12 @@ Select Provider
 Clear Provider
 ```
 
----
+\---
 
 ## External model IDs
 
 ```text
-afm/auto
+fmr/auto
 opencode/mimo-v2.5
 openrouter/mimo-v2.5
 ```
@@ -134,7 +167,7 @@ openrouter/mimo-v2.5
 의미:
 
 ```text
-afm/auto
+fmr/auto
 → Model Pool 전체 자동 routing
 
 ProviderModelID
@@ -146,7 +179,7 @@ ProviderModelID
 
 Pinned model은 반드시 Model Pool 안에 있어야 한다.
 
----
+\---
 
 ## Access
 
@@ -175,7 +208,7 @@ Paid
 
 Paid 사용은 explicit opt-in.
 
----
+\---
 
 ## Capability
 
@@ -203,9 +236,9 @@ Max Output
 
 Capability mismatch는 scoring 전에 제외한다.
 
----
+\---
 
-# 4. Phase 0 — Repository Bootstrap
+# 4\. Phase 0 — Repository Bootstrap
 
 ## 구현
 
@@ -221,7 +254,7 @@ lint/test/build scripts
 권장 구조:
 
 ```text
-cmd/afm
+cmd/fmr
 internal/app
 internal/model
 internal/provider
@@ -245,18 +278,18 @@ router ✕ provider implementations
 ```bash
 go test ./...
 go vet ./...
-go build ./cmd/afm
+go build ./cmd/fmr
 ```
 
 ## 완료 조건
 
-- 빈 Gateway binary가 빌드된다.
-- CI가 통과한다.
-- package dependency 방향이 정리되어 있다.
+* 빈 Gateway binary가 빌드된다.
+* CI가 통과한다.
+* package dependency 방향이 정리되어 있다.
 
----
+\---
 
-# 5. Phase 1 — Identity & Core Types
+# 5\. Phase 1 — Identity \& Core Types
 
 ## 구현
 
@@ -327,13 +360,13 @@ go test ./internal/model/... ./internal/provider/...
 
 ## 완료 조건
 
-- ID collision이 없다.
-- variant를 안전하게 표현한다.
-- Error scope와 retryability가 정의되어 있다.
+* ID collision이 없다.
+* variant를 안전하게 표현한다.
+* Error scope와 retryability가 정의되어 있다.
 
----
+\---
 
-# 6. Phase 2 — Single Provider End-to-End
+# 6\. Phase 2 — Single Provider End-to-End
 
 먼저 **OpenCode Public만** 구현한다.
 
@@ -359,11 +392,11 @@ POST /v1/chat/completions
 외부 model ID:
 
 ```text
-afm/auto
+fmr/auto
 opencode/<model>
 ```
 
-이 Phase에서는 `afm/auto`가 선택 가능한 OpenCode 모델 하나를 선택해도 된다.
+이 Phase에서는 `fmr/auto`가 선택 가능한 OpenCode 모델 하나를 선택해도 된다.
 
 ## Protocol translation
 
@@ -406,18 +439,18 @@ go test ./internal/providers/opencode/... ./internal/gateway/...
 실사용 smoke test:
 
 ```text
-curl → AFM → OpenCode Public
+curl → Free-Model-Router → OpenCode Public
 ```
 
 ## 완료 조건
 
-- 단일 provider proxy가 안정적으로 동작한다.
-- stream cancellation이 정상 동작한다.
-- OpenAI client가 `/v1/models`와 chat completion을 사용할 수 있다.
+* 단일 provider proxy가 안정적으로 동작한다.
+* stream cancellation이 정상 동작한다.
+* OpenAI client가 `/v1/models`와 chat completion을 사용할 수 있다.
 
----
+\---
 
-# 7. Phase 3 — Model Pool & Catalog State
+# 7\. Phase 3 — Model Pool \& Catalog State
 
 ## 구현
 
@@ -426,7 +459,7 @@ Model Pool:
 ```go
 type ModelPoolConfig struct {
     Revision int64
-    SelectedProviderModelIDs []ProviderModelID
+    SelectedProviderModelIDs \[]ProviderModelID
 }
 ```
 
@@ -436,7 +469,7 @@ Catalog는 immutable snapshot으로 관리한다.
 type CatalogSnapshot struct {
     Revision  int64
     CreatedAt time.Time
-    Models    map[ProviderModelID]ProviderModel
+    Models    map\[ProviderModelID]ProviderModel
 }
 ```
 
@@ -494,13 +527,13 @@ go test ./internal/catalog/... ./internal/config/...
 
 ## 완료 조건
 
-- catalog refresh가 selection을 파괴하지 않는다.
-- 새 모델 등장/삭제에 안정적이다.
-- revision conflict를 감지한다.
+* catalog refresh가 selection을 파괴하지 않는다.
+* 새 모델 등장/삭제에 안정적이다.
+* revision conflict를 감지한다.
 
----
+\---
 
-# 8. Phase 4 — Capability Filtering
+# 8\. Phase 4 — Capability Filtering
 
 ## 구현
 
@@ -543,12 +576,12 @@ go test ./internal/router/... -run Capability
 
 ## 완료 조건
 
-- capability mismatch가 score 계산 전에 제거된다.
-- fallback도 동일 capability requirements를 유지한다.
+* capability mismatch가 score 계산 전에 제거된다.
+* fallback도 동일 capability requirements를 유지한다.
 
----
+\---
 
-# 9. Phase 5 — OpenCode Auth Dual-Route
+# 9\. Phase 5 — OpenCode Auth Dual-Route
 
 이제 같은 ProviderModel 아래 두 route를 만든다.
 
@@ -561,7 +594,7 @@ opencode/mimo-v2.5
 ## 구현
 
 ```text
-OPENCODE_API_KEY optional
+OPENCODE\_API\_KEY optional
 Public/Auth route discovery
 route-specific access
 route-specific status
@@ -608,12 +641,12 @@ go test ./internal/providers/opencode/... -run Route
 
 ## 완료 조건
 
-- 동일 ProviderModel에 Public/Auth route가 공존한다.
-- route state가 서로 오염되지 않는다.
+* 동일 ProviderModel에 Public/Auth route가 공존한다.
+* route state가 서로 오염되지 않는다.
 
----
+\---
 
-# 10. Phase 6 — TTFT Probe & Health
+# 10\. Phase 6 — TTFT Probe \& Health
 
 ## Probe metric
 
@@ -643,12 +676,13 @@ provider concurrency cap
 EWMA:
 
 \[
-EWMA_{new}
-=
-0.25 \cdot sample
+EWMA\_{new}
+===
+
+0.25 \\cdot sample
 +
-0.75 \cdot EWMA_{old}
-\]
+0.75 \\cdot EWMA\_{old}
+]
 
 Probe 대상:
 
@@ -679,12 +713,12 @@ go test ./internal/latency/... ./internal/health/...
 
 ## 완료 조건
 
-- probe가 quota를 과도하게 소모하지 않는다.
-- route별 TTFT가 독립 유지된다.
+* probe가 quota를 과도하게 소모하지 않는다.
+* route별 TTFT가 독립 유지된다.
 
----
+\---
 
-# 11. Phase 7 — Basic Routing & Failure-Aware Fallback
+# 11\. Phase 7 — Basic Routing \& Failure-Aware Fallback
 
 아직 Artificial Analysis는 넣지 않는다.
 
@@ -732,8 +766,8 @@ credential auth failure
 ## Failover budget
 
 ```text
-AFM_MAX_ATTEMPTS=4
-AFM_FAILOVER_BUDGET_MS=30000
+FMR\_MAX\_ATTEMPTS=4
+FMR\_FAILOVER\_BUDGET\_MS=30000
 ```
 
 ## 테스트
@@ -755,12 +789,12 @@ go test ./internal/router/...
 
 ## 완료 조건
 
-- Artificial Analysis 없이도 router가 안정적으로 동작한다.
-- 잘못된 request는 다른 모델에 반복 전송하지 않는다.
+* Artificial Analysis 없이도 router가 안정적으로 동작한다.
+* 잘못된 request는 다른 모델에 반복 전송하지 않는다.
 
----
+\---
 
-# 12. Phase 8 — Streaming Commit Guard
+# 12\. Phase 8 — Streaming Commit Guard
 
 Fallback과 streaming을 별도 Phase로 검증한다.
 
@@ -835,12 +869,12 @@ go test ./internal/gateway/... -run Streaming
 
 ## 완료 조건
 
-- 두 모델의 stream이 섞이지 않는다.
-- fallback 가능한 시점이 명확하다.
+* 두 모델의 stream이 섞이지 않는다.
+* fallback 가능한 시점이 명확하다.
 
----
+\---
 
-# 13. Phase 9 — Performance Scoring
+# 13\. Phase 9 — Performance Scoring
 
 Core router가 먼저 완성된 뒤 Artificial Analysis를 추가한다.
 
@@ -866,8 +900,8 @@ type BenchmarkBinding struct {
 ## Score
 
 \[
-P = 0.55C_p + 0.30A_p + 0.15I_p
-\]
+P = 0.55C\_p + 0.30A\_p + 0.15I\_p
+]
 
 Unknown:
 
@@ -878,16 +912,17 @@ Unknown:
 Confidence:
 
 \[
-P_{effective}
-=
+P\_{effective}
+===
+
 cP + (1-c)50
-\]
+]
 
 Final:
 
 \[
 R = 0.70P + 0.30L
-\]
+]
 
 ## Cache
 
@@ -926,12 +961,12 @@ go test ./internal/matcher/... ./internal/scoring/...
 
 ## 완료 조건
 
-- performance 데이터가 없어도 router는 계속 동작한다.
-- alias mismatch가 높은 score를 과도하게 상속하지 않는다.
+* performance 데이터가 없어도 router는 계속 동작한다.
+* alias mismatch가 높은 score를 과도하게 상속하지 않는다.
 
----
+\---
 
-# 14. Phase 10 — Additional Providers
+# 14\. Phase 10 — Additional Providers
 
 한 번에 하나씩 추가한다.
 
@@ -970,12 +1005,12 @@ go test ./internal/providers/<provider>/...
 
 ## 완료 조건
 
-- provider-specific if/else가 router에 추가되지 않는다.
-- Provider interface만으로 연결된다.
+* provider-specific if/else가 router에 추가되지 않는다.
+* Provider interface만으로 연결된다.
 
----
+\---
 
-# 15. Phase 11 — Persistence & Secret Storage
+# 15\. Phase 11 — Persistence \& Secret Storage
 
 운영 state를 분리한다.
 
@@ -1039,9 +1074,9 @@ secret not logged
 go test ./internal/config/...
 ```
 
----
+\---
 
-# 16. Phase 12 — Usage Logging
+# 16\. Phase 12 — Usage Logging
 
 ## Request / Attempt 분리
 
@@ -1090,11 +1125,11 @@ go test ./internal/usage/...
 
 ## 완료 조건
 
-- fallback 때문에 token/usage 통계가 중복되지 않는다.
+* fallback 때문에 token/usage 통계가 중복되지 않는다.
 
----
+\---
 
-# 17. Phase 13 — Control API & CLI
+# 17\. Phase 13 — Control API \& CLI
 
 Management API:
 
@@ -1107,15 +1142,15 @@ local management token 사용.
 ## API
 
 ```text
-GET /_afm/status
-GET /_afm/providers
-GET /_afm/models
-GET /_afm/model-pool
-PUT /_afm/model-pool
-PATCH /_afm/model-pool
-POST /_afm/pin
-POST /_afm/auto
-GET /_afm/logs
+GET /\_fmr/status
+GET /\_fmr/providers
+GET /\_fmr/models
+GET /\_fmr/model-pool
+PUT /\_fmr/model-pool
+PATCH /\_fmr/model-pool
+POST /\_fmr/pin
+POST /\_fmr/auto
+GET /\_fmr/logs
 ```
 
 `ProviderModelID`는 path parameter로 넣지 않는다.
@@ -1131,14 +1166,14 @@ Pin:
 
 ## Version handshake
 
-`/_afm/status`:
+`/\_fmr/status`:
 
 ```json
 {
   "apiVersion": "1",
   "buildVersion": "0.7.0",
   "instanceId": "...",
-  "features": []
+  "features": \[]
 }
 ```
 
@@ -1155,26 +1190,26 @@ incompatible API major
 ## CLI
 
 ```text
-afm start
-afm stop
-afm status
-afm models
-afm providers
-afm model-pool
-afm config
-afm logs
-afm doctor
+fmr start
+fmr stop
+fmr status
+fmr models
+fmr providers
+fmr model-pool
+fmr config
+fmr logs
+fmr doctor
 ```
 
 ## Gate
 
 ```bash
-go test ./internal/control/... ./cmd/afm/...
+go test ./internal/control/... ./cmd/fmr/...
 ```
 
----
+\---
 
-# 18. Phase 14 — Security
+# 18\. Phase 14 — Security
 
 Inference API 기본 bind:
 
@@ -1185,7 +1220,7 @@ Inference API 기본 bind:
 LAN 공개는 explicit 설정:
 
 ```text
-AFM_BIND=0.0.0.0
+FMR\_BIND=0.0.0.0
 ```
 
 LAN bind 시 token auth 사용.
@@ -1204,9 +1239,9 @@ invalid token 거부
 secrets log 미노출
 ```
 
----
+\---
 
-# 19. Phase 15 — Tauri Tray
+# 19\. Phase 15 — Tauri Tray
 
 Core가 끝난 뒤 Desktop 시작.
 
@@ -1248,9 +1283,9 @@ version mismatch 표시
 autostart launch
 ```
 
----
+\---
 
-# 20. Phase 16 — Model Manager
+# 20\. Phase 16 — Model Manager
 
 별도 window.
 
@@ -1300,9 +1335,9 @@ provider selection 독립성
 revision conflict 처리
 ```
 
----
+\---
 
-# 21. Phase 17 — Usage Log Window
+# 21\. Phase 17 — Usage Log Window
 
 별도 window.
 
@@ -1345,9 +1380,9 @@ log filtering
 prompt/response 미노출
 ```
 
----
+\---
 
-# 22. Phase 18 — Packaging
+# 22\. Phase 18 — Packaging
 
 정식 Desktop:
 
@@ -1384,9 +1419,9 @@ upgrade
 uninstall
 ```
 
----
+\---
 
-# 23. Phase별 공통 종료 조건
+# 23\. Phase별 공통 종료 조건
 
 각 Phase는 다음을 모두 만족해야 완료다.
 
@@ -1404,7 +1439,7 @@ uninstall
 ```bash
 go test ./...
 go vet ./...
-go build ./cmd/afm
+go build ./cmd/fmr
 ```
 
 Desktop 시작 후 추가:
@@ -1414,9 +1449,9 @@ Tauri build
 frontend test
 ```
 
----
+\---
 
-# 24. Milestone 요약
+# 24\. Milestone 요약
 
 ## Milestone A — Working Gateway
 
@@ -1439,7 +1474,7 @@ Streaming guard
 실제 coding client가 안정적으로 사용 가능
 ```
 
----
+\---
 
 ## Milestone B — Smart Router
 
@@ -1459,7 +1494,7 @@ xAI
 성능 + TTFT 기반 자동 모델 선택
 ```
 
----
+\---
 
 ## Milestone C — Operable Gateway
 
@@ -1480,7 +1515,7 @@ Security
 장기 실행 가능한 로컬 서비스
 ```
 
----
+\---
 
 ## Milestone D — Desktop Product
 
@@ -1500,9 +1535,9 @@ Installer
 일반 사용자가 CLI 없이 제어 가능
 ```
 
----
+\---
 
-# 25. 최종 핵심 원칙
+# 25\. 최종 핵심 원칙
 
 ```text
 Identity first
@@ -1517,3 +1552,4 @@ Provider details stay out of router
 Core before Desktop
 Every Phase must be independently testable
 ```
+
