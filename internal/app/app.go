@@ -3,12 +3,16 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
-	"path/filepath"
+	"time"
 
 	"github.com/konor123/Free-Model-Router/internal/config"
+	"github.com/konor123/Free-Model-Router/internal/gateway"
 	"github.com/konor123/Free-Model-Router/internal/logging"
+	"github.com/konor123/Free-Model-Router/internal/providers/opencode"
 )
 
 // LoadConfig loads the gateway configuration from path, or the OS default
@@ -33,16 +37,37 @@ func NewLogger(cfg *config.Config) (*logging.Logger, error) {
 	return logging.New(min, os.Stderr)
 }
 
-// Run is the Phase 0 application loop: it validates the environment,
-// logs the resolved configuration summary, and blocks until ctx is canceled.
+// Run boots the gateway HTTP server and blocks until ctx is canceled.
 func Run(ctx context.Context, cfg *config.Config, log *logging.Logger) error {
-	log.Info("Free-Model-Router starting (phase 0)")
+	log.Info("Free-Model-Router starting (phase 2)")
 	log.Info("config: %s", cfg.SourcePath)
 	log.Info("log level: %s", cfg.LogLevel)
 	log.Info("gateway bind: %s", cfg.Bind)
 
-	<-ctx.Done()
+	prov := opencode.New("") // default OpenCode Public base URL
+	gw, err := gateway.NewGateway(ctx, prov)
+	if err != nil {
+		return fmt.Errorf("init gateway: %w", err)
+	}
+
+	srv := &http.Server{Addr: cfg.Bind, Handler: gw.Handler()}
+	errCh := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+	}()
+	log.Info("listening on http://%s", cfg.Bind)
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Warn("shutdown: %v", err)
+	}
 	return nil
 }
-
-var _ = filepath.Join // keep import stable until wiring grows
