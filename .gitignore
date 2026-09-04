@@ -1,0 +1,19 @@
+# Binaries
+afm
+afm.exe
+dist/
+
+# Go
+*.test
+*.out
+coverage.txt
+
+# Environment / secrets
+.env
+*.local
+
+# IDE / OS
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
