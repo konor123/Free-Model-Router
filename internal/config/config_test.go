@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -254,4 +255,81 @@ func TestDefaultStatePathsUseApplicationDirectory(t *testing.T) {
 	if filepath.Dir(secretPath) != configDir || filepath.Base(secretPath) != "secrets.json" {
 		t.Fatalf("unexpected secret path: %q", secretPath)
 	}
+}
+
+func TestLoadRejectsFutureSchemaWithoutRecovery(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	original := []byte(fmt.Sprintf(`{"schemaVersion":%d,"bind":"127.0.0.1:9393","logLevel":"info"}`, CurrentSchemaVersion+1))
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected future schema error")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("future schema file was modified: %s", got)
+	}
+	if _, err := os.Stat(path + CorruptConfigSuffix); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("future schema was quarantined: %v", err)
+	}
+}
+
+func TestDefaultCachePathRejectsTraversal(t *testing.T) {
+	for _, name := range []string{"..", ".", "../escape.json", `..\escape.json`, "nested/cache.json"} {
+		if _, err := DefaultCachePath(name); err == nil {
+			t.Fatalf("DefaultCachePath accepted traversal name %q", name)
+		}
+	}
+}
+
+func TestSecretStoreReadsReadOnlyFallback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secrets.json")
+	if err := os.WriteFile(path, []byte(`{"schemaVersion":1,"secrets":{"FMR_READ_ONLY":"read-only-value"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	store := NewSecretStoreWithBackend(path, nil)
+	if got, err := store.Get("FMR_READ_ONLY"); err != nil || got != "read-only-value" {
+		t.Fatalf("read-only fallback: got %q, err %v", got, err)
+	}
+}
+
+func TestSecretStoreFallsBackWhenCredentialWriteFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secrets.json")
+	backend := &fakeCredentialBackend{setErr: errors.New("credential backend unavailable")}
+	store := NewSecretStoreWithBackend(path, backend)
+	if err := store.Set("FMR_WRITE_FALLBACK", "file-value"); err != nil {
+		t.Fatalf("Set with unavailable backend: %v", err)
+	}
+	if got, err := store.Get("FMR_WRITE_FALLBACK"); err != nil || got != "file-value" {
+		t.Fatalf("fallback after backend write failure: got %q, err %v", got, err)
+	}
+}
+
+func TestSecretStoreConcurrentOperations(t *testing.T) {
+	store := NewSecretStoreWithBackend(filepath.Join(t.TempDir(), "secrets.json"), nil)
+	const workers = 8
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func(i int) {
+			defer wg.Done()
+			key := fmt.Sprintf("FMR_CONCURRENT_%d", i)
+			value := fmt.Sprintf("value-%d", i)
+			if err := store.Set(key, value); err != nil {
+				t.Errorf("Set(%s): %v", key, err)
+				return
+			}
+			if got, err := store.Get(key); err != nil || got != value {
+				t.Errorf("Get(%s): got %q, err %v", key, got, err)
+			}
+		}(i)
+	}
+	wg.Wait()
 }
