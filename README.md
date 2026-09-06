@@ -22,6 +22,9 @@ compatible attach/start ownership, provider menu state, and file-based autostart
 Phase 16 model-manager filtering, route performance metadata, routing scores, and
 typed control-client mutations implemented.
 Phase 17 live redacted usage events, SSE delivery, and usage-window filters implemented.
+Phase 18 Windows sidecar metadata, package manifest, portable ZIP workflow, and
+separate packaging validation command implemented. Native Tauri and clean-VM
+installer gates remain environment-blocked.
 
 ## Layout
 
@@ -38,6 +41,7 @@ internal/usage         redacted request/attempt usage log [Phase 12+]
 internal/control       authenticated desktop/CLI control API [Phase 13+]
 internal/security      bind and bearer-token policy [Phase 14+]
 internal/desktop       tray-shell lifecycle contracts [Phase 15+]
+internal/packaging     sidecar metadata and release manifest [Phase 18+]
 ```
 
 Dependency rule (see PLAN_V7 §4):
@@ -126,6 +130,22 @@ compatible attach decisions, explicit `desktop-managed` versus `external`
 ownership, and user-scoped file autostart without adding runtime Node, npm, or
 Rust requirements. Native Tauri packaging is covered by the later desktop
 scaffold and Windows packaging phase.
+
+## Windows packaging
+
+The build-time `fmr-package` command generates and verifies deterministic
+sidecar metadata containing the target triple, binary/build version, API version
+and major, ownership mode, and SHA-256. It also writes a Windows manifest that
+distinguishes build-time Node/npm/Rust requirements from the end-user runtime,
+which requires none of those tools. The separate `fmr.exe` control CLI is
+included in the portable package.
+
+From Windows, run `.\scripts\package-windows.ps1 -Version v0.18.0` to build the
+Go sidecar and CLI, generate `manifest.json`, and create a versioned ZIP. Pass
+`-DesktopExecutable path\to\desktop.exe` when a Tauri artifact is available.
+The workflow intentionally does not claim native Tauri or clean-VM install,
+first-run, autostart, upgrade, and uninstall validation until those external
+gates are run.
 
 The model-manager API exposes model and route performance fields including TTFT,
 latency score, benchmark performance, confidence, and routing score. The typed

@@ -26,4 +26,10 @@ jobs:
         run: go vet ./...
 
       - name: go build
-        run: go build ./cmd/Free-Model-Router
+        run: |
+          go build ./...
+          go build ./cmd/fmr
+          go build ./cmd/fmr-package
+
+      - name: packaging contract tests
+        run: go test ./internal/packaging/... ./cmd/fmr-package/...

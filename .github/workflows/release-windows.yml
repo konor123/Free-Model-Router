@@ -1,0 +1,45 @@
+name: release-windows
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-package:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: test Go contracts
+        run: go test ./...
+
+      - name: build portable Windows package
+        shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: .\scripts\package-windows.ps1 -Version "$env:REF_NAME" -OutputDir "dist\windows"
+
+      - name: verify package metadata
+        shell: pwsh
+        run: |
+          go run ./cmd/fmr-package `
+            -validate `
+            -binary "dist\windows\Free-Model-Router.exe" `
+            -metadata "dist\windows\Free-Model-Router.exe.metadata.json" `
+            -manifest "dist\windows\manifest.json"
+
+      - name: upload Windows sidecar package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Free-Model-Router-${{ github.ref_name }}-windows-amd64
+          path: dist/Free-Model-Router-*-windows-amd64.zip

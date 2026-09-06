@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/konor123/Free-Model-Router/releases/windows/manifest.schema.json",
+  "title": "Free-Model-Router Windows package manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "product",
+    "platform",
+    "targetTriple",
+    "desktopExecutable",
+    "desktopIncluded",
+    "gatewaySidecar",
+    "controlCli",
+    "sidecarMetadata",
+    "sidecar",
+    "runtimeRequirements",
+    "buildRequirements",
+    "installer"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "product": { "const": "Free-Model-Router" },
+    "platform": { "const": "windows" },
+    "targetTriple": { "type": "string", "minLength": 1 },
+    "desktopExecutable": { "type": "string", "pattern": "^[^\\\\/\\r\\n]+\\.exe$" },
+    "desktopIncluded": { "type": "boolean" },
+    "gatewaySidecar": { "type": "string", "pattern": "^[^\\\\/\\r\\n]+\\.exe$" },
+    "controlCli": { "type": "string", "pattern": "^[^\\\\/\\r\\n]+\\.exe$" },
+    "sidecarMetadata": { "type": "string", "pattern": "^[^\\\\/\\r\\n]+\\.json$" },
+    "sidecar": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "product", "artifact", "targetTriple", "binaryVersion", "apiVersion", "apiMajor", "sha256", "ownership"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "product": { "const": "Free-Model-Router" },
+        "artifact": { "type": "string", "minLength": 1 },
+        "targetTriple": { "type": "string", "minLength": 1 },
+        "binaryVersion": { "type": "string", "minLength": 1 },
+        "apiVersion": { "type": "string", "minLength": 1 },
+        "apiMajor": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "ownership": { "enum": ["desktop-managed", "external"] }
+      }
+    },
+    "runtimeRequirements": {
+      "$ref": "#/$defs/toolRequirements"
+    },
+    "buildRequirements": {
+      "$ref": "#/$defs/toolRequirements"
+    },
+    "installer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "upgrade", "uninstall"],
+      "properties": {
+        "format": { "const": "zip" },
+        "upgrade": { "const": "replace-versioned-install-and-preserve-user-data" },
+        "uninstall": { "const": "remove-installed-binaries-and-preserve-user-data" }
+      }
+    }
+  },
+  "$defs": {
+    "toolRequirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["go", "node", "npm", "rust"],
+      "properties": {
+        "go": { "type": "boolean" },
+        "node": { "type": "boolean" },
+        "npm": { "type": "boolean" },
+        "rust": { "type": "boolean" }
+      }
+    }
+  }
+}
