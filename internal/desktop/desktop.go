@@ -484,16 +484,14 @@ func (p *commandProcess) Stop() error {
 	p.once.Do(func() {
 		if err := p.command.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			p.err = err
+			return
+		}
+		err := <-p.done
+		if err != nil && !errors.Is(err, os.ErrProcessDone) {
+			p.err = err
 		}
 	})
-	if p.err != nil {
-		return p.err
-	}
-	err := <-p.done
-	if err != nil && !errors.Is(err, os.ErrProcessDone) {
-		return err
-	}
-	return nil
+	return p.err
 }
 
 // ProviderMenuEntry is a safe tray menu item derived from control data.
