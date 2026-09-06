@@ -3,6 +3,7 @@
 package health
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -16,6 +17,7 @@ type Manager struct {
 	routes   map[string]*RouteSnapshot
 	provCap  map[string]int
 	inFlight map[string]int
+	changed  map[string]chan struct{}
 }
 
 // RouteSnapshot is a read-only view of one route's health.
@@ -31,6 +33,7 @@ func New() *Manager {
 		routes:   map[string]*RouteSnapshot{},
 		provCap:  map[string]int{},
 		inFlight: map[string]int{},
+		changed:  map[string]chan struct{}{},
 	}
 }
 
@@ -39,6 +42,7 @@ func (m *Manager) SetProviderCap(provider string, n int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.provCap[provider] = n
+	m.notifyLocked(provider)
 }
 
 // ProviderCap returns the configured cap.
@@ -48,22 +52,29 @@ func (m *Manager) ProviderCap(provider string) int {
 	return m.provCap[provider]
 }
 
-// AcquireSlot blocks until a concurrency slot is available under the provider
-// cap. A zero cap means unlimited. Always pair with ReleaseSlot.
-func (m *Manager) AcquireSlot(provider string) bool {
+// AcquireSlot blocks until a concurrency slot is available or ctx is canceled.
+// The returned release function is idempotent. A zero cap means unlimited.
+func (m *Manager) AcquireSlot(ctx context.Context, provider string) (func(), error) {
 	for {
-		cap := m.ProviderCap(provider)
-		if cap <= 0 {
-			return true
-		}
 		m.mu.Lock()
-		if m.inFlight[provider] < cap {
+		if err := ctx.Err(); err != nil {
+			m.mu.Unlock()
+			return nil, err
+		}
+		cap := m.provCap[provider]
+		if cap <= 0 || m.inFlight[provider] < cap {
 			m.inFlight[provider]++
 			m.mu.Unlock()
-			return true
+			var once sync.Once
+			return func() { once.Do(func() { m.ReleaseSlot(provider) }) }, nil
 		}
+		changed := m.changeChannelLocked(provider)
 		m.mu.Unlock()
-		time.Sleep(5 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-changed:
+		}
 	}
 }
 
@@ -73,7 +84,23 @@ func (m *Manager) ReleaseSlot(provider string) {
 	defer m.mu.Unlock()
 	if m.inFlight[provider] > 0 {
 		m.inFlight[provider]--
+		m.notifyLocked(provider)
 	}
+}
+
+func (m *Manager) changeChannelLocked(provider string) chan struct{} {
+	ch := m.changed[provider]
+	if ch == nil {
+		ch = make(chan struct{})
+		m.changed[provider] = ch
+	}
+	return ch
+}
+
+func (m *Manager) notifyLocked(provider string) {
+	ch := m.changeChannelLocked(provider)
+	close(ch)
+	m.changed[provider] = make(chan struct{})
 }
 
 // RouteFailure records a failure and starts a cooldown window.

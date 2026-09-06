@@ -4,6 +4,7 @@
 package router
 
 import (
+	"github.com/konor123/Free-Model-Router/internal/health"
 	"github.com/konor123/Free-Model-Router/internal/model"
 )
 
@@ -54,6 +55,9 @@ type FilterInput struct {
 	// ProtocolCompatible optionally vetoes candidates whose protocol cannot
 	// express the request (nil = no veto).
 	ProtocolCompatible func(model.ProviderRoute) bool
+
+	// Health optionally excludes cooling-down or quota-exhausted routes.
+	Health *health.Manager
 }
 
 // Filter applies the eligibility chain:
@@ -101,7 +105,11 @@ func Filter(in FilterInput) EligibilityResult {
 				res.Excluded = append(res.Excluded, Exclusion{ID: id, Reason: "protocol incompatible"})
 				continue
 			}
-			if !routeAccessAllowed(route.Access, in.AllowPaid) {
+			if in.Health != nil && !in.Health.Available(string(route.ID)) {
+				res.Excluded = append(res.Excluded, Exclusion{ID: id, Reason: "health unavailable"})
+				continue
+			}
+			if !routeAccessAllowed(route.EffectiveAccess(), in.AllowPaid) {
 				res.Excluded = append(res.Excluded, Exclusion{ID: id, Reason: "access not allowed"})
 				continue
 			}

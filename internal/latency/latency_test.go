@@ -28,7 +28,7 @@ func TestEWMAUpdateFormula(t *testing.T) {
 	}
 }
 
-func TestRegistryRequestPreferredOverProbe(t *testing.T) {
+func TestRegistryProbePreferredOverRequest(t *testing.T) {
 	r := NewRegistry()
 	r.RecordProbe("route-a", 500)
 	r.RecordProbe("route-a", 600)
@@ -36,8 +36,8 @@ func TestRegistryRequestPreferredOverProbe(t *testing.T) {
 		t.Fatalf("probe-only TTFT: %v", v)
 	}
 	r.RecordRequest("route-a", 200, 1500)
-	if v, _ := r.EffectiveTTFT("route-a"); v != 200 {
-		t.Fatalf("request sample must win, got %v", v)
+	if v, _ := r.EffectiveTTFT("route-a"); v < 499 || v > 601 {
+		t.Fatalf("probe sample must win, got %v", v)
 	}
 }
 

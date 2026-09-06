@@ -3,6 +3,7 @@ package probe
 
 import (
 	"context"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -24,15 +25,32 @@ type Scheduler struct {
 	Health *health.Manager
 
 	interval time.Duration
+	timeout  time.Duration
 
 	mu      sync.Mutex
 	cancel  context.CancelFunc
+	done    chan struct{}
 	running bool
+	runID   uint64
 }
+
+// DefaultProbeTimeout bounds both slot acquisition and one upstream probe.
+const DefaultProbeTimeout = 10 * time.Second
+
+// Snapshot is an immutable, coherent probe view loaded once per cycle.
+type Snapshot struct {
+	Catalog *model.CatalogSnapshot
+	Pool    []model.ProviderModelID
+	Routes  map[model.ProviderModelID][]model.ProviderRoute
+	Provider provider.Provider
+}
+
+// SnapshotSource supplies the current immutable probe view.
+type SnapshotSource func() *Snapshot
 
 // New builds a Scheduler.
 func New(reg *latency.Registry, h *health.Manager, interval time.Duration) *Scheduler {
-	return &Scheduler{Reg: reg, Health: h, interval: interval}
+	return &Scheduler{Reg: reg, Health: h, interval: interval, timeout: DefaultProbeTimeout}
 }
 
 // EligibleTargets filters routes down to probeable candidates (PLAN_V7 §10):
@@ -57,7 +75,7 @@ func EligibleTargets(catalog *model.CatalogSnapshot, pool []model.ProviderModelI
 			if !route.Enabled {
 				continue
 			}
-			if !route.Access.AutoRoutable() {
+			if !route.EffectiveAccess().AutoRoutable() {
 				continue // Paid/Unknown never probed
 			}
 			if !h.Available(string(route.ID)) {
@@ -69,42 +87,75 @@ func EligibleTargets(catalog *model.CatalogSnapshot, pool []model.ProviderModelI
 	return out
 }
 
-// Start begins the periodic probe loop.
-func (s *Scheduler) Start(ctx context.Context, catalog *model.CatalogSnapshot, pool []model.ProviderModelID, routes map[model.ProviderModelID][]model.ProviderRoute, prov provider.Provider) {
+// Start begins the periodic probe loop using a fresh coherent snapshot per cycle.
+func (s *Scheduler) Start(ctx context.Context, source SnapshotSource) {
 	s.mu.Lock()
 	if s.running {
 		s.mu.Unlock()
 		return
 	}
 	ctx, s.cancel = context.WithCancel(ctx)
+	s.done = make(chan struct{})
+	s.runID++
+	myRunID := s.runID
+	done := s.done
 	s.running = true
 	s.mu.Unlock()
 
 	go func() {
-		ticker := time.NewTicker(s.interval)
-		defer ticker.Stop()
+		defer close(done)
 		for {
+			delay := s.jitteredInterval()
+			timer := time.NewTimer(delay)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
+				// Clear running only if we still own the active run.
+				s.mu.Lock()
+				if s.runID == myRunID {
+					s.running = false
+					s.cancel = nil
+					s.done = nil
+				}
+				s.mu.Unlock()
 				return
-			case <-ticker.C:
-				targets := EligibleTargets(catalog, pool, routes, s.Health)
+			case <-timer.C:
+				snap := source()
+				if snap == nil || snap.Provider == nil {
+					continue
+				}
+				targets := EligibleTargets(snap.Catalog, snap.Pool, snap.Routes, s.Health)
 				for _, t := range targets {
-					s.probeOnce(ctx, t, prov)
+					s.probeOnce(ctx, t, snap.Provider)
 				}
 			}
 		}
 	}()
 }
 
+func (s *Scheduler) jitteredInterval() time.Duration {
+	if s.interval <= 0 {
+		return time.Millisecond
+	}
+	// ±10% avoids synchronized bursts while retaining predictable cadence.
+	delta := s.interval / 10
+	if delta == 0 {
+		return s.interval
+	}
+	return s.interval - delta + time.Duration(rand.Int63n(int64(2*delta)+1))
+}
+
 // Stop halts the scheduler.
 func (s *Scheduler) Stop() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cancel != nil {
-		s.cancel()
+	cancel, done := s.cancel, s.done
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
-	s.running = false
+	if done != nil {
+		<-done
+	}
 }
 
 // ProbeOnce sends one minimal probe request and records its TTFT.
@@ -114,10 +165,13 @@ func (s *Scheduler) ProbeOnce(ctx context.Context, t Target, prov provider.Provi
 }
 
 func (s *Scheduler) probeOnce(ctx context.Context, t Target, prov provider.Provider) {
-	if !s.Health.AcquireSlot("opencode") {
+	probeCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	release, err := s.Health.AcquireSlot(probeCtx, t.Route.Provider)
+	if err != nil {
 		return
 	}
-	defer s.Health.ReleaseSlot("opencode")
+	defer release()
 
 	req := provider.NormalizedRequest{
 		Messages:  []provider.Message{{Role: "user", Content: "ping"}},
@@ -125,18 +179,20 @@ func (s *Scheduler) probeOnce(ctx context.Context, t Target, prov provider.Provi
 		Stream:    true,
 	}
 	timer := latency.Start()
-	stream, err := prov.ChatCompletion(ctx, t.Route, req)
+	stream, err := prov.ChatCompletion(probeCtx, t.Route, req)
 	if err != nil {
-		s.Health.RouteFailure(string(t.Route.ID), 0)
+		if ctx.Err() == nil {
+			s.Health.RouteFailure(string(t.Route.ID), 0)
+		}
 		return
 	}
 	defer stream.Close()
 
 	recorded := false
 	for {
-		ev, err := stream.Next(ctx)
+		ev, err := stream.Next(probeCtx)
 		if err != nil {
-			if !recorded {
+			if !recorded && ctx.Err() == nil {
 				s.Health.RouteFailure(string(t.Route.ID), 0)
 			}
 			return
@@ -149,6 +205,9 @@ func (s *Scheduler) probeOnce(ctx context.Context, t Target, prov provider.Provi
 			}
 		}
 		if ev.FinishReason != "" {
+			if !recorded && ctx.Err() == nil {
+				s.Health.RouteFailure(string(t.Route.ID), 0)
+			}
 			return
 		}
 	}

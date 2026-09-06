@@ -10,6 +10,8 @@ func route(id, modelID string, access model.AccessClass, override *model.Capabil
 	return model.ProviderRoute{
 		ID:                 model.RouteID(id),
 		ModelID:            model.ProviderModelID(modelID),
+		Provider:           "opencode",
+		UpstreamModelID:    id,
 		Access:             access,
 		Enabled:            true,
 		CapabilityOverride: override,
@@ -162,7 +164,7 @@ func TestStreamingUnsupportedExcluded(t *testing.T) {
 	textID := mustLookup(t, in, "text")
 	noStream := false
 	in.Routes[textID] = []model.ProviderRoute{
-		{ID: "pub-text", ModelID: textID, Access: model.AccessFree, Enabled: true,
+		{ID: "pub-text", ModelID: textID, Provider: "opencode", UpstreamModelID: "text-only", Access: model.AccessFree, Enabled: true,
 			CapabilityOverride: &model.Capabilities{Streaming: noStream}},
 	}
 	in.Reqs = model.RequestRequirements{Streaming: true}

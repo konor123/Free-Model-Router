@@ -103,8 +103,9 @@ func (r *Registry) RecordRequest(routeID string, ttftMs, totalMs float64) {
 	s.RequestTotal.Add(totalMs)
 }
 
-// EffectiveTTFT returns the best available TTFT estimate: request samples
-// preferred, probe samples as fallback.
+// EffectiveTTFT returns the best available routing estimate: probes are
+// primary because they are controlled and comparable; request samples are a
+// fallback when no probe is available.
 func (r *Registry) EffectiveTTFT(routeID string) (ms float64, ok bool) {
 	r.mu.RLock()
 	s, exists := r.routes[routeID]
@@ -112,10 +113,10 @@ func (r *Registry) EffectiveTTFT(routeID string) (ms float64, ok bool) {
 	if !exists {
 		return 0, false
 	}
-	if v, ok := s.RequestTTFT.Value(); ok {
+	if v, ok := s.ProbeTTFT.Value(); ok {
 		return v, true
 	}
-	return s.ProbeTTFT.Value()
+	return s.RequestTTFT.Value()
 }
 
 // Timer measures TTFT against the first semantic event.

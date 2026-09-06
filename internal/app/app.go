@@ -49,6 +49,8 @@ func Run(ctx context.Context, cfg *config.Config, log *logging.Logger) error {
 	if err != nil {
 		return fmt.Errorf("init gateway: %w", err)
 	}
+	gw.StartProbes(ctx)
+	defer gw.StopProbes()
 
 	srv := &http.Server{Addr: cfg.Bind, Handler: gw.Handler()}
 	errCh := make(chan error, 1)

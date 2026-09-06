@@ -12,16 +12,16 @@ func TestEligibleTargetsFiltering(t *testing.T) {
 	h := health.New()
 	id, _ := model.NewProviderModelID("opencode", "m")
 	catalog := &model.CatalogSnapshot{Revision: 1, Models: map[model.ProviderModelID]model.ProviderModel{
-		id: {ID: id},
+		id: {ID: id, UpstreamID: "m"},
 	}}
 	routes := map[model.ProviderModelID][]model.ProviderRoute{
 		id: {
-			{ID: "pub::m", ModelID: id, Access: model.AccessFree, Enabled: true},
-			{ID: "zen::m", ModelID: id, Access: model.AccessFreeTier, Enabled: true},
-			{ID: "paid::m", ModelID: id, Access: model.AccessPaid, Enabled: true},
-			{ID: "unk::m", ModelID: id, Access: model.AccessUnknown, Enabled: true},
-			{ID: "off::m", ModelID: id, Access: model.AccessFree, Enabled: false},
-			{ID: "cool::m", ModelID: id, Access: model.AccessFree, Enabled: true},
+			{ID: "pub::m", ModelID: id, Provider: "opencode", UpstreamModelID: "m", Access: model.AccessFree, Enabled: true},
+			{ID: "zen::m", ModelID: id, Provider: "opencode", UpstreamModelID: "m", Access: model.AccessFreeTier, Enabled: true},
+			{ID: "paid::m", ModelID: id, Provider: "opencode", UpstreamModelID: "m", Access: model.AccessPaid, Enabled: true},
+			{ID: "unk::m", ModelID: id, Provider: "opencode", UpstreamModelID: "m", Access: model.AccessUnknown, Enabled: true},
+			{ID: "off::m", ModelID: id, Provider: "opencode", UpstreamModelID: "m", Access: model.AccessFree, Enabled: false},
+			{ID: "cool::m", ModelID: id, Provider: "opencode", UpstreamModelID: "m", Access: model.AccessFree, Enabled: true},
 		},
 	}
 	// One route is cooling down.
@@ -40,9 +40,9 @@ func TestEligibleTargetsFiltering(t *testing.T) {
 func TestCooldownSkipInTargetSelection(t *testing.T) {
 	h := health.New()
 	id, _ := model.NewProviderModelID("opencode", "m")
-	catalog := &model.CatalogSnapshot{Revision: 1, Models: map[model.ProviderModelID]model.ProviderModel{id: {ID: id}}}
+	catalog := &model.CatalogSnapshot{Revision: 1, Models: map[model.ProviderModelID]model.ProviderModel{id: {ID: id, UpstreamID: "m"}}}
 	routes := map[model.ProviderModelID][]model.ProviderRoute{
-		id: {{ID: "pub::m", ModelID: id, Access: model.AccessFree, Enabled: true}},
+		id: {{ID: "pub::m", ModelID: id, Provider: "opencode", UpstreamModelID: "m", Access: model.AccessFree, Enabled: true}},
 	}
 	h.RouteFailure("pub::m", time.Second)
 	targets := EligibleTargets(catalog, []model.ProviderModelID{id}, routes, h)
@@ -54,9 +54,9 @@ func TestCooldownSkipInTargetSelection(t *testing.T) {
 func TestPaidNeverProbed(t *testing.T) {
 	h := health.New()
 	id, _ := model.NewProviderModelID("opencode", "m")
-	catalog := &model.CatalogSnapshot{Revision: 1, Models: map[model.ProviderModelID]model.ProviderModel{id: {ID: id}}}
+	catalog := &model.CatalogSnapshot{Revision: 1, Models: map[model.ProviderModelID]model.ProviderModel{id: {ID: id, UpstreamID: "m"}}}
 	routes := map[model.ProviderModelID][]model.ProviderRoute{
-		id: {{ID: "paid::m", ModelID: id, Access: model.AccessPaid, Enabled: true}},
+		id: {{ID: "paid::m", ModelID: id, Provider: "opencode", UpstreamModelID: "m", Access: model.AccessPaid, Enabled: true}},
 	}
 	if targets := EligibleTargets(catalog, []model.ProviderModelID{id}, routes, h); len(targets) != 0 {
 		t.Fatal("paid routes must never be auto-probed")
