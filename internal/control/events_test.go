@@ -1,7 +1,10 @@
 package control
 
 import (
+	"bufio"
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -36,35 +39,80 @@ func (s testEventSource) Subscribe() (<-chan usage.Event, func()) { return s.bro
 
 func TestControlLogsEventsStreamsSafeLiveUsage(t *testing.T) {
 	source := testEventSource{broadcaster: usage.NewBroadcaster(4)}
-	server, err := NewServer(eventBackend{}, Options{Token: "secret", Events: source})
+	controlServer, err := NewServer(eventBackend{}, Options{Token: "secret", Events: source})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	req := httptest.NewRequest(http.MethodGet, "/_fmr/logs/events", nil).WithContext(ctx)
-	req.RemoteAddr = "127.0.0.1:1000"
+	handlerDone := make(chan struct{})
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(handlerDone)
+		controlServer.ServeHTTP(w, r)
+	}))
+	defer httpServer.Close()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, httpServer.URL+"/_fmr/logs/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	req.Header.Set("Authorization", "Bearer secret")
-	response := httptest.NewRecorder()
-	done := make(chan struct{})
+	responseCh := make(chan *http.Response, 1)
+	errCh := make(chan error, 1)
 	go func() {
-		server.ServeHTTP(response, req)
-		close(done)
+		response, err := httpServer.Client().Do(req)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		responseCh <- response
 	}()
-	time.Sleep(10 * time.Millisecond)
+	var response *http.Response
+	select {
+	case response = <-responseCh:
+	case err := <-errCh:
+		t.Fatal(err)
+	case <-time.After(time.Second):
+		t.Fatal("SSE request did not receive response headers")
+	}
+	defer response.Body.Close()
+	bodyDone := make(chan struct{})
+	var body strings.Builder
+	eventSeen := make(chan string, 1)
+	go func() {
+		defer close(bodyDone)
+		scanner := bufio.NewScanner(response.Body)
+		for scanner.Scan() {
+			body.WriteString(scanner.Text())
+			body.WriteByte('\n')
+			if strings.Contains(body.String(), "request-3") {
+				select {
+				case eventSeen <- body.String():
+				default:
+				}
+			}
+		}
+		if err := scanner.Err(); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
+			t.Errorf("read SSE body: %v", err)
+		}
+	}()
 	source.broadcaster.Publish(usage.Event{Type: usage.EventCompleted, RequestID: "request-3", Record: &usage.RequestRecord{ID: "request-3", Result: usage.ResultSuccess}})
-	deadline := time.Now().Add(time.Second)
-	for !strings.Contains(response.Body.String(), "request-3") && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
+	select {
+	case <-eventSeen:
+	case <-time.After(time.Second):
+		t.Fatal("SSE event was not delivered")
 	}
 	cancel()
 	select {
-	case <-done:
+	case <-bodyDone:
+	case <-time.After(time.Second):
+		t.Fatal("SSE response did not stop after cancellation")
+	}
+	select {
+	case <-handlerDone:
 	case <-time.After(time.Second):
 		t.Fatal("SSE handler did not stop after cancellation")
 	}
-	body := response.Body.String()
-	if !strings.Contains(body, "event: completed") || strings.Contains(body, "messages") || strings.Contains(body, "authorization") {
-		t.Fatalf("SSE body = %q", body)
+	if !strings.Contains(body.String(), "event: completed") || strings.Contains(body.String(), "messages") || strings.Contains(body.String(), "authorization") {
+		t.Fatalf("SSE body = %q", body.String())
 	}
 }

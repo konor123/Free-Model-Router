@@ -177,6 +177,29 @@ func TestFallbackProtocolSkipsSameModelAlternate(t *testing.T) {
 	}
 }
 
+func TestFallbackServerErrorAdvancesToNextProviderModel(t *testing.T) {
+	p := &fallbackProvider{models: []string{"a", "b"}}
+	p.behavior = func(_ context.Context, route model.ProviderRoute, _ provider.NormalizedRequest) (provider.ChatStream, error) {
+		if strings.HasSuffix(string(route.ID), "::a") {
+			return nil, provider.NewFailureError(model.NewFailure(model.FailureServerError, model.ScopeProvider), errors.New("upstream 500"))
+		}
+		return successFallbackStream("model-b"), nil
+	}
+	g, err := NewGatewayWithFailoverPolicy(context.Background(), p, FailoverPolicy{MaxAttempts: 4, Budget: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := doFallbackRequest(t, g, `{"model":"fmr/auto","messages":[{"role":"user","content":"x"}]}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "model-b") {
+		t.Fatalf("server-error fallback response = %d %s", w.Code, w.Body.String())
+	}
+	calls := p.Calls()
+	want := []string{"opencode-public::a", "opencode-public::b"}
+	if len(calls) != len(want) || calls[0] != want[0] || calls[1] != want[1] {
+		t.Fatalf("server-error fallback calls = %v, want %v", calls, want)
+	}
+}
+
 func TestFallbackRespectsMaxAttempts(t *testing.T) {
 	p := &fallbackProvider{models: []string{"a", "b", "c"}}
 	p.behavior = func(_ context.Context, _ model.ProviderRoute, _ provider.NormalizedRequest) (provider.ChatStream, error) {
