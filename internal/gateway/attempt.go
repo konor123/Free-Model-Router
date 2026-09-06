@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -16,7 +17,113 @@ import (
 	"github.com/konor123/Free-Model-Router/internal/model"
 	"github.com/konor123/Free-Model-Router/internal/provider"
 	"github.com/konor123/Free-Model-Router/internal/router"
+	"github.com/konor123/Free-Model-Router/internal/usage"
 )
+
+type usageCollectorKey struct{}
+
+// usageCollector is request-scoped and deliberately stores only operational
+// metadata. It is attached to the request context so attempt helpers keep
+// their existing signatures while still reporting every fallback attempt.
+type usageCollector struct {
+	mu         sync.Mutex
+	attempts   []usage.AttemptRecord
+	finalModel model.ProviderModelID
+	finalRoute model.RouteID
+	provider   string
+	tokens     usage.TokenUsage
+	result     usage.Result
+}
+
+func withUsageCollector(ctx context.Context) (context.Context, *usageCollector) {
+	collector := &usageCollector{}
+	return context.WithValue(ctx, usageCollectorKey{}, collector), collector
+}
+
+func collectorFromContext(ctx context.Context) *usageCollector {
+	if ctx == nil {
+		return nil
+	}
+	collector, _ := ctx.Value(usageCollectorKey{}).(*usageCollector)
+	return collector
+}
+
+func (c *usageCollector) record(ctx context.Context, candidate router.Candidate, started time.Time, ttftMs float64, committed bool, tokens provider.TokenUsage, err error) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	record := usage.AttemptRecord{
+		ProviderModel:  candidate.Model.ID,
+		Route:          candidate.Route.ID,
+		TTFTMs:         ttftMs,
+		TotalLatencyMs: durationMilliseconds(time.Since(started)),
+		Committed:      committed,
+		Tokens: usage.TokenUsage{
+			Prompt:     tokens.Prompt,
+			Completion: tokens.Completion,
+			Total:      tokens.Total,
+		},
+	}
+	if err == nil {
+		record.HTTPStatus = http.StatusOK
+		c.result = usage.ResultSuccess
+	} else {
+		failure, _ := fallbackDecision(err)
+		record.FailureClass = failure.Class
+		record.FailureScope = failure.Scope
+		record.HTTPStatus = attemptHTTPStatus(err)
+		if isRequestCanceled(ctx, err) {
+			c.result = usage.ResultCanceled
+		} else if committed {
+			c.result = usage.ResultPartial
+		} else if c.result == "" || c.result == usage.ResultSuccess {
+			c.result = usage.ResultFailure
+		}
+	}
+	record.Index = len(c.attempts) + 1
+	c.attempts = append(c.attempts, record)
+	if committed {
+		c.finalModel = candidate.Model.ID
+		c.finalRoute = candidate.Route.ID
+		c.provider = candidate.Route.Provider
+		if tokens != (provider.TokenUsage{}) {
+			c.tokens = usage.TokenUsage{Prompt: tokens.Prompt, Completion: tokens.Completion, Total: tokens.Total}
+		}
+	}
+}
+
+func (c *usageCollector) snapshot() (attempts []usage.AttemptRecord, finalModel model.ProviderModelID, finalRoute model.RouteID, providerName string, tokens usage.TokenUsage, result usage.Result) {
+	if c == nil {
+		return nil, "", "", "", usage.TokenUsage{}, ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]usage.AttemptRecord(nil), c.attempts...), c.finalModel, c.finalRoute, c.provider, c.tokens, c.result
+}
+
+func attemptHTTPStatus(err error) int {
+	if err == nil {
+		return http.StatusOK
+	}
+	var failureErr *provider.FailureError
+	if errors.As(err, &failureErr) && failureErr.HTTPStatus > 0 {
+		return failureErr.HTTPStatus
+	}
+	var unsupported *provider.UnsupportedError
+	if errors.As(err, &unsupported) {
+		return http.StatusBadRequest
+	}
+	var failureErrValue *provider.FailureError
+	if errors.As(err, &failureErrValue) {
+		return model.HTTPStatus(failureErrValue.Failure)
+	}
+	if errors.Is(err, context.Canceled) {
+		return 0
+	}
+	return http.StatusBadGateway
+}
 
 type attemptCandidate struct {
 	router.Candidate
@@ -121,6 +228,33 @@ func (g *Gateway) ChatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	requestStarted := time.Now().UTC()
+	requestCtx, collector := withUsageCollector(r.Context())
+	requestID := usage.NewRequestID()
+	w.Header().Set("X-FMR-Request-ID", requestID)
+	defer func() {
+		attempts, finalModel, finalRoute, providerName, tokens, result := collector.snapshot()
+		if result == "" {
+			if r.Context().Err() != nil {
+				result = usage.ResultCanceled
+			} else {
+				result = usage.ResultFailure
+			}
+		}
+		g.recordUsage(usage.RequestRecord{
+			ID:          requestID,
+			StartedAt:   requestStarted,
+			CompletedAt: time.Now().UTC(),
+			Provider:    providerName,
+			FinalModel:  finalModel,
+			FinalRoute:  finalRoute,
+			Attempts:    attempts,
+			Result:      result,
+			Fallback:    len(attempts) > 1,
+			TotalTokens: tokens,
+		})
+	}()
+
 	candidates := g.resolveAttemptCandidates(req)
 	if len(candidates) == 0 {
 		if req.Model != "" && !isAutoModel(req.Model) {
@@ -147,7 +281,7 @@ func (g *Gateway) ChatHandler(w http.ResponseWriter, r *http.Request) {
 	var lastErr error
 
 	for attempt := 0; attempt < policy.MaxAttempts; attempt++ {
-		if r.Context().Err() != nil {
+		if requestCtx.Err() != nil {
 			return
 		}
 		if attempt > 0 && !time.Now().Before(deadline) {
@@ -160,13 +294,13 @@ func (g *Gateway) ChatHandler(w http.ResponseWriter, r *http.Request) {
 		attempted[candidate.Route.ID] = true
 		current := candidate.Candidate
 		previous = &current
-		budget := newAttemptBudget(r.Context(), deadline)
+		budget := newAttemptBudget(requestCtx, deadline)
 
 		var handled bool
 		if req.Stream {
-			handled, err = g.runStreamingAttempt(w, r.Context(), budget, current, normalized)
+			handled, err = g.runStreamingAttempt(w, requestCtx, budget, current, normalized)
 		} else {
-			handled, err = g.runNonStreamingAttempt(w, r.Context(), budget, current, normalized)
+			handled, err = g.runNonStreamingAttempt(w, requestCtx, budget, current, normalized)
 		}
 		budget.Close()
 		if handled {
@@ -182,7 +316,7 @@ func (g *Gateway) ChatHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if r.Context().Err() != nil {
+	if requestCtx.Err() != nil {
 		return
 	}
 	if lastErr != nil {
@@ -404,6 +538,17 @@ func (g *Gateway) recordAttemptFailure(ctx context.Context, candidate router.Can
 }
 
 func (g *Gateway) runNonStreamingAttempt(w http.ResponseWriter, parent context.Context, budget *attemptBudget, candidate router.Candidate, req provider.NormalizedRequest) (bool, error) {
+	var ttftMs float64
+	var tokens provider.TokenUsage
+	committed := false
+	return g.runNonStreamingAttemptWithUsage(w, parent, budget, candidate, req, &ttftMs, &tokens, &committed)
+}
+
+func (g *Gateway) runNonStreamingAttemptWithUsage(w http.ResponseWriter, parent context.Context, budget *attemptBudget, candidate router.Candidate, req provider.NormalizedRequest, ttft *float64, tokens *provider.TokenUsage, committed *bool) (handled bool, err error) {
+	started := time.Now()
+	defer func() {
+		collectorFromContext(parent).record(parent, candidate, started, *ttft, *committed, *tokens, err)
+	}()
 	ctx := budget.ctx
 	release, err := g.health.AcquireSlot(ctx, candidate.Route.Provider)
 	if err != nil {
@@ -432,13 +577,12 @@ func (g *Gateway) runNonStreamingAttempt(w http.ResponseWriter, parent context.C
 	var sb strings.Builder
 	var reasoning strings.Builder
 	var toolCalls []json.RawMessage
-	var ttftMs float64
 	recordedTTFT := false
 	finish := ""
 	for {
 		ev, nextErr := stream.Next(ctx)
 		if budget.Expired() {
-			return false, g.failAttemptWithBudget(parent, candidate, timer, ttftMs)
+			return false, g.failAttemptWithBudget(parent, candidate, timer, *ttft)
 		}
 		if errors.Is(nextErr, io.EOF) {
 			if !recordedTTFT {
@@ -449,7 +593,7 @@ func (g *Gateway) runNonStreamingAttempt(w http.ResponseWriter, parent context.C
 			break
 		}
 		if nextErr != nil {
-			g.recordAttemptFailure(parent, candidate, timer, ttftMs, nextErr)
+			g.recordAttemptFailure(parent, candidate, timer, *ttft, nextErr)
 			return false, nextErr
 		}
 		sb.WriteString(ev.DeltaText)
@@ -457,9 +601,12 @@ func (g *Gateway) runNonStreamingAttempt(w http.ResponseWriter, parent context.C
 		reasoning.WriteString(ev.ReasoningContent)
 		if ev.Semantic() && !recordedTTFT {
 			if d, ok := timer.OnSemanticEvent(); ok {
-				ttftMs = durationMilliseconds(d)
+				*ttft = durationMilliseconds(d)
 				recordedTTFT = true
 			}
+		}
+		if ev.Usage != nil {
+			*tokens = *ev.Usage
 		}
 		if ev.FinishReason != "" {
 			finish = ev.FinishReason
@@ -484,12 +631,24 @@ func (g *Gateway) runNonStreamingAttempt(w http.ResponseWriter, parent context.C
 	resp.Choices[0].Message.Reasoning = reasoning.String()
 	resp.Choices[0].FinishReason = finish
 	writeJSON(w, http.StatusOK, resp)
-	g.latency.RecordRequest(string(candidate.Route.ID), ttftMs, durationMilliseconds(timer.Elapsed()))
+	*committed = true
+	g.latency.RecordRequest(string(candidate.Route.ID), *ttft, durationMilliseconds(timer.Elapsed()))
 	g.health.RouteSuccess(string(candidate.Route.ID))
 	return true, nil
 }
 
 func (g *Gateway) runStreamingAttempt(w http.ResponseWriter, parent context.Context, budget *attemptBudget, candidate router.Candidate, req provider.NormalizedRequest) (bool, error) {
+	var ttftMs float64
+	var tokens provider.TokenUsage
+	committed := false
+	return g.runStreamingAttemptWithUsage(w, parent, budget, candidate, req, &ttftMs, &tokens, &committed)
+}
+
+func (g *Gateway) runStreamingAttemptWithUsage(w http.ResponseWriter, parent context.Context, budget *attemptBudget, candidate router.Candidate, req provider.NormalizedRequest, ttft *float64, tokens *provider.TokenUsage, committed *bool) (handled bool, err error) {
+	started := time.Now()
+	defer func() {
+		collectorFromContext(parent).record(parent, candidate, started, *ttft, *committed, *tokens, err)
+	}()
 	ctx := budget.ctx
 	release, err := g.health.AcquireSlot(ctx, candidate.Route.Provider)
 	if err != nil {
@@ -515,8 +674,6 @@ func (g *Gateway) runStreamingAttempt(w http.ResponseWriter, parent context.Cont
 	}
 	defer stream.Close()
 	flusher := w.(http.Flusher)
-	committed := false
-	var ttftMs float64
 	recordedTTFT := false
 	commit := func() bool {
 		if !budget.Commit() {
@@ -525,7 +682,7 @@ func (g *Gateway) runStreamingAttempt(w http.ResponseWriter, parent context.Cont
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-		committed = true
+		*committed = true
 		return true
 	}
 	writeChunk := func(ev provider.StreamEvent) {
@@ -556,53 +713,58 @@ func (g *Gateway) runStreamingAttempt(w http.ResponseWriter, parent context.Cont
 
 	for {
 		ev, nextErr := stream.Next(ctx)
-		if budget.Expired() && !committed {
-			return false, g.failAttemptWithBudget(parent, candidate, timer, ttftMs)
+		if budget.Expired() && !*committed {
+			return false, g.failAttemptWithBudget(parent, candidate, timer, *ttft)
 		}
 		if errors.Is(nextErr, io.EOF) {
-			if !committed {
+			if !*committed {
 				err = provider.NewFailureError(model.NewFailure(model.FailureProtocol, model.ScopeRoute), errors.New("upstream ended before first semantic event"))
 				g.recordAttemptFailure(parent, candidate, timer, 0, err)
 				return false, err
 			}
 			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 			flusher.Flush()
-			g.latency.RecordRequest(string(candidate.Route.ID), ttftMs, durationMilliseconds(timer.Elapsed()))
+			g.latency.RecordRequest(string(candidate.Route.ID), *ttft, durationMilliseconds(timer.Elapsed()))
 			g.health.RouteSuccess(string(candidate.Route.ID))
 			return true, nil
 		}
 		if nextErr != nil {
-			if !committed {
-				g.recordAttemptFailure(parent, candidate, timer, ttftMs, nextErr)
+			if !*committed {
+				g.recordAttemptFailure(parent, candidate, timer, *ttft, nextErr)
 				return false, nextErr
 			}
 			if isRequestCanceled(parent, nextErr) {
-				return true, nil
+				err = nextErr
+				return true, err
 			}
-			g.recordAttemptFailure(parent, candidate, timer, ttftMs, nextErr)
+			g.recordAttemptFailure(parent, candidate, timer, *ttft, nextErr)
 			writeSSEError(w, nextErr)
 			flusher.Flush()
-			return true, nil
+			err = nextErr
+			return true, err
 		}
 		if !ev.Semantic() {
 			continue
 		}
 		if !recordedTTFT {
 			if d, ok := timer.OnSemanticEvent(); ok {
-				ttftMs = durationMilliseconds(d)
+				*ttft = durationMilliseconds(d)
 				recordedTTFT = true
 			}
 		}
-		if !committed {
+		if ev.Usage != nil {
+			*tokens = *ev.Usage
+		}
+		if !*committed {
 			if !commit() {
-				return false, g.failAttemptWithBudget(parent, candidate, timer, ttftMs)
+				return false, g.failAttemptWithBudget(parent, candidate, timer, *ttft)
 			}
 		}
 		writeChunk(ev)
 		if ev.FinishReason != "" {
 			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 			flusher.Flush()
-			g.latency.RecordRequest(string(candidate.Route.ID), ttftMs, durationMilliseconds(timer.Elapsed()))
+			g.latency.RecordRequest(string(candidate.Route.ID), *ttft, durationMilliseconds(timer.Elapsed()))
 			g.health.RouteSuccess(string(candidate.Route.ID))
 			return true, nil
 		}

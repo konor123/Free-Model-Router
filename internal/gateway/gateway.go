@@ -20,6 +20,7 @@ import (
 	"github.com/konor123/Free-Model-Router/internal/provider"
 	"github.com/konor123/Free-Model-Router/internal/providers/opencode"
 	"github.com/konor123/Free-Model-Router/internal/scoring"
+	"github.com/konor123/Free-Model-Router/internal/usage"
 )
 
 // ExternalAutoModel is the external model id meaning "route over the whole pool".
@@ -50,6 +51,36 @@ type Gateway struct {
 	failover          FailoverPolicy
 	benchmarkSnapshot scoring.Snapshot
 	benchmarkBindings map[model.ProviderModelID]matcher.BenchmarkBinding
+	usageSink         usage.Sink
+}
+
+// SetUsageSink installs the append-only request usage sink. A nil sink
+// disables durable usage recording without changing request behavior.
+func (g *Gateway) SetUsageSink(sink usage.Sink) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.usageSink = sink
+}
+
+// UsageSink returns the currently configured usage sink.
+func (g *Gateway) UsageSink() usage.Sink {
+	if g == nil {
+		return nil
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.usageSink
+}
+
+func (g *Gateway) recordUsage(record usage.RequestRecord) {
+	if sink := g.UsageSink(); sink != nil {
+		// Usage logging is observational. A full or unavailable log must never
+		// change the client's inference response or fallback behavior.
+		_ = sink.Append(record)
+	}
 }
 
 // NewGateway builds a Gateway and performs the initial catalog discovery.

@@ -118,6 +118,9 @@ func (p *Provider) ChatCompletion(ctx context.Context, route model.ProviderRoute
 			fmt.Errorf("chat response has no choices"))
 	}
 	ev := provider.StreamEvent{DeltaText: out.Choices[0].Delta, FinishReason: out.Choices[0].FinishReason}
+	if out.Usage.TotalTokens > 0 || out.Usage.PromptTokens > 0 || out.Usage.CompletionTokens > 0 {
+		ev.Usage = &provider.TokenUsage{Prompt: out.Usage.PromptTokens, Completion: out.Usage.CompletionTokens, Total: out.Usage.TotalTokens}
+	}
 	if ev.DeltaText == "" && out.Choices[0].Message.Content != "" {
 		ev.DeltaText = out.Choices[0].Message.Content
 	}
@@ -174,9 +177,16 @@ type chatResponse struct {
 		Delta        string `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
+	Usage tokenUsage `json:"usage,omitempty"`
 }
 
-func errStatus(code int) error { return fmt.Errorf("upstream status %d", code) }
+type tokenUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+func errStatus(code int) error { return provider.NewStatusError(code) }
 
 func drain(body io.ReadCloser) {
 	_, _ = io.Copy(io.Discard, io.LimitReader(body, 1<<20))
@@ -200,6 +210,7 @@ type sseChunk struct {
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
+	Usage *tokenUsage `json:"usage,omitempty"`
 }
 
 func (s *sseStream) Next(ctx context.Context) (provider.StreamEvent, error) {
@@ -253,6 +264,9 @@ func (s *sseStream) Next(ctx context.Context) (provider.StreamEvent, error) {
 		}
 		if len(c.Delta.ToolCalls) > 0 {
 			ev.ToolCalls = append(ev.ToolCalls, c.Delta.ToolCalls...)
+		}
+		if chunk.Usage != nil {
+			ev.Usage = &provider.TokenUsage{Prompt: chunk.Usage.PromptTokens, Completion: chunk.Usage.CompletionTokens, Total: chunk.Usage.TotalTokens}
 		}
 		if ev.Semantic() {
 			return ev, nil

@@ -136,6 +136,17 @@ func DefaultCachePath(name string) (string, error) {
 	return filepath.Join(dir, name), nil
 }
 
+// DefaultUsagePath returns the user-scoped durable usage-log path. Usage logs
+// are kept below a separate logs directory rather than mixing with config,
+// secrets, or disposable cache snapshots.
+func DefaultUsagePath() (string, error) {
+	dir, err := ConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "logs", "usage.jsonl"), nil
+}
+
 // ErrNotFound is retained for callers that want to classify an absent config.
 // Load itself intentionally treats a missing config as a defaults case.
 var ErrNotFound = errors.New("config file not found")

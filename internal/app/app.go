@@ -15,6 +15,7 @@ import (
 	"github.com/konor123/Free-Model-Router/internal/logging"
 	"github.com/konor123/Free-Model-Router/internal/provider"
 	"github.com/konor123/Free-Model-Router/internal/providers/opencode"
+	"github.com/konor123/Free-Model-Router/internal/usage"
 )
 
 // LoadConfig loads the gateway configuration from path, or the OS default
@@ -60,6 +61,16 @@ func RunWithProvider(ctx context.Context, cfg *config.Config, log *logging.Logge
 	if err != nil {
 		return fmt.Errorf("init gateway: %w", err)
 	}
+	usageStore := usage.NewMemory()
+	if cfg.SourcePath != "" {
+		if path, pathErr := config.DefaultUsagePath(); pathErr == nil {
+			if persisted, storeErr := usage.New(path); storeErr == nil {
+				usageStore = persisted
+			}
+		}
+	}
+	gw.SetUsageSink(usageStore)
+	defer usageStore.Close()
 	gw.StartProbes(ctx)
 	defer gw.StopProbes()
 

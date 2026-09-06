@@ -113,6 +113,13 @@ func TestPublicDefaultLocationsAndSecretEnvironmentOverride(t *testing.T) {
 	if filepath.Base(filepath.Dir(configPath)) != config.ApplicationName || filepath.Base(filepath.Dir(cachePath)) != config.ApplicationName {
 		t.Fatalf("unexpected default state paths: config=%q cache=%q", configPath, cachePath)
 	}
+	usagePath, err := config.DefaultUsagePath()
+	if err != nil {
+		t.Fatalf("DefaultUsagePath: %v", err)
+	}
+	if filepath.Base(filepath.Dir(usagePath)) != "logs" || filepath.Base(filepath.Dir(filepath.Dir(usagePath))) != config.ApplicationName {
+		t.Fatalf("unexpected default usage path: %q", usagePath)
+	}
 	loaded, err := app.LoadConfig("")
 	if err != nil {
 		t.Fatalf("app.LoadConfig default path: %v", err)

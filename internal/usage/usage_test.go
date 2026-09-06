@@ -66,7 +66,7 @@ func TestStoreSeparatesRequestAndAttemptsWithoutSensitiveFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	serialized := string(data)
-	for _, forbidden := range []string{"prompt", "response", "Authorization", "api-key", "secret"} {
+	for _, forbidden := range []string{"messages", "response", "authorization", "api-key", "super-secret", "prompt text"} {
 		if strings.Contains(strings.ToLower(serialized), strings.ToLower(forbidden)) {
 			t.Fatalf("usage log contains forbidden field %q: %s", forbidden, serialized)
 		}
@@ -109,11 +109,37 @@ func TestStoreRetentionByAgeAndSize(t *testing.T) {
 	}
 }
 
+func TestStorePersistsAndReopens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.jsonl")
+	store, err := usage.New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(usage.RequestRecord{ID: "persisted", Result: usage.ResultSuccess}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := usage.New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := reopened.List(usage.Query{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "persisted" || got[0].Result != usage.ResultSuccess {
+		t.Fatalf("reopened usage records = %+v", got)
+	}
+}
+
 func TestQueryFiltersUsageRecords(t *testing.T) {
 	store := usage.NewMemory()
+	now := time.Now().UTC()
 	for _, record := range []usage.RequestRecord{
-		{ID: "a", StartedAt: time.Unix(10, 0).UTC(), FinalModel: "gemini/gemini-2.5-flash", Result: usage.ResultSuccess},
-		{ID: "b", StartedAt: time.Unix(20, 0).UTC(), FinalModel: "xai/grok-3", Result: usage.ResultFailure, Fallback: true},
+		{ID: "a", StartedAt: now.Add(-2 * time.Second), CompletedAt: now.Add(-2 * time.Second), FinalModel: "gemini/gemini-2.5-flash", Result: usage.ResultSuccess},
+		{ID: "b", StartedAt: now.Add(-1 * time.Second), CompletedAt: now.Add(-1 * time.Second), FinalModel: "xai/grok-3", Result: usage.ResultFailure, Fallback: true},
 	} {
 		if err := store.Append(record); err != nil {
 			t.Fatal(err)

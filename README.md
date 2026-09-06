@@ -13,6 +13,8 @@ Phase 8 streaming commit guard validated.
 Phase 9 benchmark matching, confidence-aware scoring, and runtime ranking integrated.
 Phase 10 additional NVIDIA, Gemini, and xAI providers implemented.
 Phase 11 persistence, schema migration, OS state directories, and secret storage implemented.
+Phase 12 request-level usage logging with per-attempt fallback history, token metadata,
+and bounded durable retention implemented.
 
 ## Layout
 
@@ -25,6 +27,7 @@ internal/providers     concrete provider implementations [Phase 2+]
 internal/router        eligibility + fallback           [Phase 4+]
 internal/gateway       OpenAI-compatible HTTP surface   [Phase 2+]
 internal/config        configuration + persistence + secrets [Phase 0+]
+internal/usage         redacted request/attempt usage log [Phase 12+]
 ```
 
 Dependency rule (see PLAN_V7 §4):
@@ -64,3 +67,10 @@ cache directory. Secret lookup is fail-closed and ordered as follows:
 3. a separate user-only `secrets.json` fallback file
 
 Secret values are never included in configuration or usage logs.
+
+Usage logs contain one record per inference request and nested records for each
+fallback attempt. They retain route metadata, failure classification, TTFT,
+latency, commit state, HTTP status, and provider-reported token counts, but never
+retain prompts, responses, API keys, or Authorization headers. Durable logs are
+stored as protected JSONL below the user configuration directory and are bounded
+to 20 MB and 30 days.

@@ -107,6 +107,9 @@ func (p *Provider) ChatCompletion(ctx context.Context, route model.ProviderRoute
 			fmt.Errorf("chat response has no choices"))
 	}
 	ev := provider.StreamEvent{DeltaText: out.Choices[0].Message.Content, FinishReason: out.Choices[0].FinishReason}
+	if out.Usage.TotalTokens > 0 || out.Usage.PromptTokens > 0 || out.Usage.CompletionTokens > 0 {
+		ev.Usage = &provider.TokenUsage{Prompt: out.Usage.PromptTokens, Completion: out.Usage.CompletionTokens, Total: out.Usage.TotalTokens}
+	}
 	ev.ReasoningContent = out.Choices[0].Message.ReasoningContent
 	for _, toolCall := range out.Choices[0].Message.ToolCalls {
 		raw, err := json.Marshal(toolCall)
@@ -151,6 +154,13 @@ func buildPayload(mdl string, req provider.NormalizedRequest) ([]byte, error) {
 // chatResponse is the OpenAI-compatible non-streaming response.
 type chatResponse struct {
 	Choices []chatChoice `json:"choices"`
+	Usage   tokenUsage   `json:"usage,omitempty"`
+}
+
+type tokenUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 type chatChoice struct {
@@ -164,7 +174,7 @@ type chatMessage struct {
 	ReasoningContent string              `json:"reasoning_content"`
 }
 
-func errStatus(code int) error { return fmt.Errorf("upstream status %d", code) }
+func errStatus(code int) error { return provider.NewStatusError(code) }
 
 func drain(body io.ReadCloser) {
 	_, _ = io.Copy(io.Discard, io.LimitReader(body, 1<<20))
@@ -188,6 +198,7 @@ type sseChunk struct {
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
+	Usage *tokenUsage `json:"usage,omitempty"`
 }
 
 func (s *sseStream) Next(ctx context.Context) (provider.StreamEvent, error) {
@@ -250,6 +261,9 @@ func (s *sseStream) Next(ctx context.Context) (provider.StreamEvent, error) {
 		}
 		if len(c.Delta.ToolCalls) > 0 {
 			ev.ToolCalls = append(ev.ToolCalls, c.Delta.ToolCalls...)
+		}
+		if chunk.Usage != nil {
+			ev.Usage = &provider.TokenUsage{Prompt: chunk.Usage.PromptTokens, Completion: chunk.Usage.CompletionTokens, Total: chunk.Usage.TotalTokens}
 		}
 		if ev.Semantic() {
 			return ev, nil

@@ -6,7 +6,9 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"strconv"
 
 	"github.com/konor123/Free-Model-Router/internal/model"
 )
@@ -37,6 +39,9 @@ type StreamEvent struct {
 	ReasoningContent string
 	// FinishReason is set on the final event ("stop", "tool_calls", ...).
 	FinishReason string
+	// Usage is optional provider-reported token accounting. Providers may attach
+	// it to the final event when the upstream response includes usage metadata.
+	Usage *TokenUsage
 }
 
 // Semantic reports whether this event carries user-visible semantics.
@@ -61,24 +66,32 @@ type Provider interface {
 
 // NormalizedRequest is the provider-agnostic chat request.
 type NormalizedRequest struct {
-	Messages    []Message            `json:"messages"`
-	Tools       []ToolSpec           `json:"tools,omitempty"`
-	ToolChoice  json.RawMessage      `json:"tool_choice,omitempty"`
-	ResponseFormat json.RawMessage   `json:"response_format,omitempty"`
-	Reasoning   json.RawMessage      `json:"reasoning,omitempty"`
-	Stream      bool                 `json:"stream"`
-	MaxTokens   int                  `json:"maxTokens,omitempty"`
-	Temperature *float64             `json:"temperature,omitempty"`
-	Extensions  map[string]Extension `json:"-"`
+	Messages       []Message            `json:"messages"`
+	Tools          []ToolSpec           `json:"tools,omitempty"`
+	ToolChoice     json.RawMessage      `json:"tool_choice,omitempty"`
+	ResponseFormat json.RawMessage      `json:"response_format,omitempty"`
+	Reasoning      json.RawMessage      `json:"reasoning,omitempty"`
+	Stream         bool                 `json:"stream"`
+	MaxTokens      int                  `json:"maxTokens,omitempty"`
+	Temperature    *float64             `json:"temperature,omitempty"`
+	Extensions     map[string]Extension `json:"-"`
 }
 
 // Message is one normalized chat message.
 type Message struct {
-	Role       string          `json:"role"` // system | user | assistant | tool
-	Content    any             `json:"content"`
-	ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
-	Name       string          `json:"name,omitempty"`
+	Role       string     `json:"role"` // system | user | assistant | tool
+	Content    any        `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Name       string     `json:"name,omitempty"`
+}
+
+// TokenUsage is provider-reported token accounting. A zero value means that
+// the upstream did not return usage metadata.
+type TokenUsage struct {
+	Prompt     int
+	Completion int
+	Total      int
 }
 
 // ContentPart is one supported multimodal content fragment.
@@ -135,6 +148,9 @@ func (e *UnsupportedError) Error() string {
 type FailureError struct {
 	Failure model.Failure
 	Cause   error
+	// HTTPStatus is the upstream response status when one was available. It is
+	// intentionally optional because network and local failures have no status.
+	HTTPStatus int `json:"-"`
 }
 
 func (e *FailureError) Error() string {
@@ -148,8 +164,32 @@ func (e *FailureError) Unwrap() error { return e.Cause }
 
 // NewFailureError builds a FailureError.
 func NewFailureError(f model.Failure, cause error) *FailureError {
-	return &FailureError{Failure: f, Cause: cause}
+	result := &FailureError{Failure: f, Cause: cause}
+	var carrier interface{ HTTPStatusCode() int }
+	if errors.As(cause, &carrier) {
+		result.HTTPStatus = carrier.HTTPStatusCode()
+	}
+	return result
 }
+
+// NewHTTPFailureError builds a classified failure with an explicit upstream
+// response status.
+func NewHTTPFailureError(f model.Failure, status int, cause error) *FailureError {
+	result := NewFailureError(f, cause)
+	result.HTTPStatus = status
+	return result
+}
+
+// StatusError preserves an upstream HTTP status while retaining a safe,
+// generic error message for logs and clients.
+type StatusError struct{ Code int }
+
+// NewStatusError creates a status-carrying upstream error.
+func NewStatusError(code int) error { return &StatusError{Code: code} }
+
+func (e *StatusError) Error() string { return "upstream status " + strconv.Itoa(e.Code) }
+
+func (e *StatusError) HTTPStatusCode() int { return e.Code }
 
 // Ensure interfaces are usable.
 var _ io.Closer = (ChatStream)(nil)
