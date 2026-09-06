@@ -15,6 +15,10 @@ Phase 10 additional NVIDIA, Gemini, and xAI providers implemented.
 Phase 11 persistence, schema migration, OS state directories, and secret storage implemented.
 Phase 12 request-level usage logging with per-attempt fallback history, token metadata,
 and bounded durable retention implemented.
+Phase 13 localhost control API and `fmr` CLI implemented.
+Phase 14 loopback management and explicit LAN inference authentication implemented.
+Phase 15 desktop lifecycle core implemented, including single-instance leases,
+compatible attach/start ownership, provider menu state, and file-based autostart.
 
 ## Layout
 
@@ -28,6 +32,9 @@ internal/router        eligibility + fallback           [Phase 4+]
 internal/gateway       OpenAI-compatible HTTP surface   [Phase 2+]
 internal/config        configuration + persistence + secrets [Phase 0+]
 internal/usage         redacted request/attempt usage log [Phase 12+]
+internal/control       authenticated desktop/CLI control API [Phase 13+]
+internal/security      bind and bearer-token policy [Phase 14+]
+internal/desktop       tray-shell lifecycle contracts [Phase 15+]
 ```
 
 Dependency rule (see PLAN_V7 §4):
@@ -109,3 +116,10 @@ outside the host, set `FMR_BIND` explicitly to a non-loopback address such as
 authentication. The management listener is always validated as loopback-only,
 regardless of the inference bind. Authentication tokens and other secrets are
 never written to application logs or control responses.
+
+The desktop lifecycle core deliberately keeps native tray rendering in a shell
+adapter. It provides atomic profile leases, stale-owner recovery, API-major
+compatible attach decisions, explicit `desktop-managed` versus `external`
+ownership, and user-scoped file autostart without adding runtime Node, npm, or
+Rust requirements. Native Tauri packaging is covered by the later desktop
+scaffold and Windows packaging phase.
