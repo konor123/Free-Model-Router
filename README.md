@@ -1,6 +1,6 @@
 # Free-Model-Router
 
-Auto Free Models (AFM): local AI gateway (Go) + Tauri desktop UI that discovers free / free-tier
+Free Model Router (FMR): local AI gateway (Go) + Tauri desktop UI that discovers free / free-tier
 LLM providers and routes requests by capability, performance, TTFT, and health.
 
 Plan of record: [PLAN_V7.md](PLAN_V7.md).
