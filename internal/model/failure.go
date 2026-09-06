@@ -32,14 +32,13 @@ const (
 
 // Failure is a classified upstream failure.
 type Failure struct {
-	Class     FailureClass `json:"class"`
-	Scope     FailureScope `json:"scope"`
-	Retryable bool         `json:"retryable"`
+	Class FailureClass `json:"class"`
+	Scope FailureScope `json:"scope"`
 }
 
-// NewFailure builds a Failure, deriving retryability from class/scope when unset.
+// NewFailure builds a classified failure. Routing policy is decided separately.
 func NewFailure(class FailureClass, scope FailureScope) Failure {
-	return Failure{Class: class, Scope: scope, Retryable: defaultRetryable(class)}
+	return Failure{Class: class, Scope: scope}
 }
 
 // Validate checks the failure is well-formed.
@@ -55,25 +54,57 @@ func (f Failure) Validate() error {
 	return nil
 }
 
-// defaultRetryable encodes the Phase 7 fallback policy at type level:
-//   - canceled: never retryable (fallback forbidden)
-//   - bad request / protocol error: same model must not be retried
-//   - auth: retryable only at credential-scope exclusion level
-//   - rate limited: retryable via alternate route
-//   - timeout: retryable within failover budget
-//   - 5xx: retryable, but prefer next ProviderModel
-func defaultRetryable(class FailureClass) bool {
-	switch class {
-	case FailureCanceled, FailureBadRequest, FailureProtocol:
-		return false
-	case FailureAuth, FailureRateLimited, FailureTimeout, FailureServerError, FailureNetwork, FailureUnknown:
-		return true
+// FailureAction is the sole routing-policy outcome for a classified failure.
+type FailureAction string
+
+const (
+	ActionStop              FailureAction = "Stop"
+	ActionNextRoute         FailureAction = "NextRoute"
+	ActionNextModel         FailureAction = "NextModel"
+	ActionDisableCredential FailureAction = "DisableCredential"
+	ActionDisableRoute      FailureAction = "DisableRoute"
+	ActionCooldownProvider  FailureAction = "CooldownProvider"
+)
+
+// DecideFailureAction centralizes the conservative pre-fallback policy.
+// Request-scoped failures are client errors and must never be retried elsewhere.
+func DecideFailureAction(f Failure) FailureAction {
+	if f.Scope == ScopeRequest || f.Class == FailureCanceled || f.Class == FailureUnknown {
+		return ActionStop
+	}
+	switch f.Class {
+	case FailureAuth:
+		if f.Scope == ScopeCredential {
+			return ActionDisableCredential
+		}
+		return ActionStop
+	case FailureRateLimited:
+		if f.Scope == ScopeProvider {
+			return ActionCooldownProvider
+		}
+		return ActionNextRoute
+	case FailureTimeout, FailureNetwork:
+		return ActionNextRoute
+	case FailureServerError:
+		return ActionNextModel
+	case FailureProtocol:
+		return ActionDisableRoute
+	case FailureBadRequest:
+		return ActionStop
 	default:
-		return false
+		return ActionStop
 	}
 }
 
-// FallbackAllowed reports whether another candidate may be tried after this failure.
-func (f Failure) FallbackAllowed() bool {
-	return f.Class != FailureCanceled
+// HTTPStatus maps a terminal classified failure to the public API response.
+// Candidate progression is always decided first by DecideFailureAction.
+func HTTPStatus(f Failure) int {
+	switch f.Class {
+	case FailureRateLimited:
+		return 429
+	case FailureBadRequest:
+		return 400
+	default:
+		return 502
+	}
 }

@@ -17,17 +17,16 @@ const ProviderID = "opencode"
 // baseURL is the OpenCode public API base. Overridable for tests.
 var defaultBaseURL = "https://opencode.ai/zen/v1"
 
-// PublicRoute builds the canonical public route for a model id.
-func PublicRoute(pmid model.ProviderModelID, caps model.Capabilities, access model.AccessClass) model.ProviderRoute {
-	mdl := ""
-	if _, m, err := pmid.Parse(); err == nil {
-		mdl = m
-	}
-	rid, _ := model.NewRouteID(PublicRouteName, mdl)
+// PublicRoute builds the canonical public route for a model id and its opaque
+// provider-native model identifier.
+func PublicRoute(pmid model.ProviderModelID, upstreamID string, caps model.Capabilities) model.ProviderRoute {
+	rid, _ := model.NewRouteID(PublicRouteName, upstreamID)
 	return model.ProviderRoute{
-		ID:      rid,
-		ModelID: pmid,
-		Access:  access,
+		ID:              rid,
+		ModelID:         pmid,
+		Provider:        ProviderID,
+		UpstreamModelID: upstreamID,
+		Access:          model.AccessFree,
 		Enabled: true,
 		// Protocol-level capabilities intersected with model base capabilities.
 		CapabilityOverride: &model.Capabilities{

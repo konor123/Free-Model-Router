@@ -120,9 +120,17 @@ func (p *PoolState) Deselect(ids []model.ProviderModelID) {
 	p.Config.Revision++
 }
 
-// SelectAll switches to Automatic mode (all eligible models included).
-func (p *PoolState) SelectAll() {
+// SelectAll switches to Automatic mode and immediately includes every model
+// with an enabled free/free-tier route in the current snapshot.
+func (p *PoolState) SelectAll(catalog *model.CatalogSnapshot, routes map[model.ProviderModelID][]model.ProviderRoute) {
 	p.Config.Mode = ModeAutomatic
+	if catalog != nil {
+		for id := range catalog.Models {
+			if !p.Config.Contains(id) && hasAutoRoutableRoute(routes[id]) {
+				p.Config.SelectedProviderModelIDs = append(p.Config.SelectedProviderModelIDs, id)
+			}
+		}
+	}
 	p.Config.Revision++
 	p.tombstones = map[model.ProviderModelID]bool{}
 }

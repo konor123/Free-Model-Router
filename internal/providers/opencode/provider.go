@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"encoding/base64"
 	"strings"
 	"time"
 
@@ -21,8 +22,6 @@ type Provider struct {
 	AuthBaseOverride string
 	// HTTP client used for all calls.
 	HTTP *http.Client
-	// DefaultAccess assigned to discovered models (Public route => Free).
-	Access model.AccessClass
 }
 
 // New builds a Provider with sane defaults.
@@ -33,7 +32,6 @@ func New(baseURL string) *Provider {
 	return &Provider{
 		BaseURL: baseURL,
 		HTTP:    &http.Client{},
-		Access:  model.AccessFree,
 	}
 }
 
@@ -95,7 +93,7 @@ func (p *Provider) DiscoverModels(ctx context.Context) (*model.CatalogSnapshot, 
 		if e.ID == "" {
 			continue
 		}
-		pmid, err := model.NewProviderModelID(ProviderID, e.ID)
+		pmid, err := model.NewProviderModelID(ProviderID, providerModelSegment(e.ID))
 		if err != nil {
 			continue // skip non-normalizable entries
 		}
@@ -104,7 +102,7 @@ func (p *Provider) DiscoverModels(ctx context.Context) (*model.CatalogSnapshot, 
 			ID:           pmid,
 			CanonicalKey: key,
 			DisplayName:  e.ID,
-			Access:       p.Access,
+			UpstreamID:   e.ID,
 			Base: model.Capabilities{
 				Streaming:        boolOr(e.Streaming, true),
 				Tools:            boolOr(e.Tools, false),
@@ -114,6 +112,10 @@ func (p *Provider) DiscoverModels(ctx context.Context) (*model.CatalogSnapshot, 
 				ContextLength:    e.ContextLength,
 				MaxOutput:        e.MaxOutput,
 			},
+		}
+		if existing, exists := snap.Models[pmid]; exists && existing.UpstreamID != e.ID {
+			return nil, provider.NewFailureError(model.NewFailure(model.FailureProtocol, model.ScopeProvider),
+				fmt.Errorf("provider model ID collision for upstream IDs %q and %q", existing.UpstreamID, e.ID))
 		}
 		snap.Models[pmid] = pm
 	}
@@ -134,7 +136,16 @@ func canonicalize(id string) string {
 
 func boolOr(b *bool, def bool) bool {
 	if b == nil {
-		return false
+		return def
 	}
 	return *b
+}
+
+// providerModelSegment creates a stable slash-free internal segment while
+// preserving the exact provider-native identifier separately on ProviderModel.
+func providerModelSegment(upstreamID string) string {
+	if !strings.ContainsAny(upstreamID, "/\\") {
+		return upstreamID
+	}
+	return "b64-" + base64.RawURLEncoding.EncodeToString([]byte(upstreamID))
 }

@@ -48,11 +48,18 @@ func TestSupportsRequirement(t *testing.T) {
 
 func TestRouteEffectiveCapabilities(t *testing.T) {
 	base := Capabilities{Streaming: true, Tools: true}
-	route := ProviderRoute{ID: "opencode-public::m", ModelID: "opencode/m", Access: AccessFree, Enabled: true,
+	route := ProviderRoute{ID: "opencode-public::m", ModelID: "opencode/m", Provider: "opencode", UpstreamModelID: "m", Access: AccessFree, Enabled: true,
 		CapabilityOverride: &Capabilities{Streaming: true, Tools: false}}
 	got := route.EffectiveCapabilities(base)
 	if got.Streaming != true || got.Tools != false {
 		t.Fatalf("effective capabilities wrong: %+v", got)
+	}
+}
+
+func TestRouteEffectiveAccessDefaultsToUnknown(t *testing.T) {
+	route := ProviderRoute{}
+	if route.EffectiveAccess() != AccessUnknown {
+		t.Fatalf("empty route access = %q, want Unknown", route.EffectiveAccess())
 	}
 }
 

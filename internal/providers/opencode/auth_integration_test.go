@@ -41,11 +41,11 @@ func TestAuthAndPublicRoutesTargetDifferentEndpoints(t *testing.T) {
 	req := provider.NormalizedRequest{Messages: []provider.Message{{Role: "user", Content: "hi"}}}
 
 	// Public route call.
-	if _, err := p.ChatCompletion(context.Background(), PublicRoute(pmid, model.Capabilities{}, model.AccessFree), req); err != nil {
+	if _, err := p.ChatCompletion(context.Background(), PublicRoute(pmid, "mimo-v2.5", model.Capabilities{}), req); err != nil {
 		t.Fatal(err)
 	}
 	// Zen auth route call.
-	if _, err := p.ChatCompletion(context.Background(), AuthRoute(pmid), req); err != nil {
+	if _, err := p.ChatCompletion(context.Background(), AuthRoute(pmid, "mimo-v2.5"), req); err != nil {
 		t.Fatal(err)
 	}
 
@@ -81,7 +81,7 @@ func TestAuth401DoesNotAffectPublic(t *testing.T) {
 	req := provider.NormalizedRequest{Messages: []provider.Message{{Role: "user", Content: "hi"}}}
 
 	// Auth route fails with credential-scoped failure.
-	_, authErr := p.ChatCompletion(context.Background(), AuthRoute(pmid), req)
+	_, authErr := p.ChatCompletion(context.Background(), AuthRoute(pmid, "mimo-v2.5"), req)
 	var fe *provider.FailureError
 	if authErr == nil || !asFailureError(authErr, &fe) || fe.Failure.Class != model.FailureAuth {
 		t.Fatalf("expected auth failure on zen route, got %v", authErr)
@@ -91,7 +91,7 @@ func TestAuth401DoesNotAffectPublic(t *testing.T) {
 	}
 
 	// Public route still works afterwards.
-	stream, err := p.ChatCompletion(context.Background(), PublicRoute(pmid, model.Capabilities{}, model.AccessFree), req)
+	stream, err := p.ChatCompletion(context.Background(), PublicRoute(pmid, "mimo-v2.5", model.Capabilities{}), req)
 	if err != nil {
 		t.Fatalf("public route must be unaffected: %v", err)
 	}

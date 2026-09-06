@@ -47,9 +47,9 @@ func NewCanonicalModelKey(s string) (CanonicalModelKey, error) {
 }
 
 // NewProviderModelID validates and constructs a ProviderModelID of the form
-// "<provider>/<model>". Model part may contain slashes only from separators
-// already owned by the provider; we enforce a single-level "<provider>/<model>"
-// form where <model> excludes further "/" to keep parsing unambiguous.
+// "<provider>/<model>". This is an internal/client-facing identifier, not the
+// provider-native model identifier; use ProviderModel.UpstreamID for the latter.
+// We enforce a single-level "<provider>/<model>" form to keep parsing unambiguous.
 // Variants are expressed inside <model> using '.' or '-' (e.g. "glm-5.3-flash:free").
 func NewProviderModelID(prov, mdl string) (ProviderModelID, error) {
 	if !provider.MatchString(prov) {

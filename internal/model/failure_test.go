@@ -4,35 +4,52 @@ import "testing"
 
 func TestCanceledFailureForbidsFallback(t *testing.T) {
 	f := NewFailure(FailureCanceled, ScopeRequest)
-	if f.Retryable {
-		t.Fatal("canceled must not be retryable")
-	}
-	if f.FallbackAllowed() {
-		t.Fatal("canceled must forbid fallback")
+	if DecideFailureAction(f) != ActionStop {
+		t.Fatal("canceled must stop")
 	}
 	if err := f.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
 }
 
-func TestBadRequestNotRetryableOnSameModel(t *testing.T) {
+func TestBadRequestStops(t *testing.T) {
 	f := NewFailure(FailureBadRequest, ScopeRoute)
-	if f.Retryable {
-		t.Fatal("bad request must not be retryable")
+	if DecideFailureAction(f) != ActionStop {
+		t.Fatal("bad request must not fallback")
 	}
 }
 
-func TestAuthFailureRetryableWithCredentialScope(t *testing.T) {
+func TestAuthFailureDisablesCredential(t *testing.T) {
 	f := NewFailure(FailureAuth, ScopeCredential)
-	if !f.Retryable {
-		t.Fatal("auth failure should allow fallback excluding same credential")
+	if DecideFailureAction(f) != ActionDisableCredential {
+		t.Fatal("auth failure should disable its credential")
 	}
 }
 
-func TestRateLimitedFallbackAllowed(t *testing.T) {
+func TestRateLimitedMovesToNextRoute(t *testing.T) {
 	f := NewFailure(FailureRateLimited, ScopeRoute)
-	if !f.FallbackAllowed() || !f.Retryable {
-		t.Fatal("429 must allow fallback via alternate route")
+	if DecideFailureAction(f) != ActionNextRoute {
+		t.Fatal("429 must move to the next route")
+	}
+}
+
+func TestFailureDecisionScopeAndClassMatrix(t *testing.T) {
+	cases := []struct {
+		failure Failure
+		want    FailureAction
+	}{
+		{NewFailure(FailureProtocol, ScopeRoute), ActionDisableRoute},
+		{NewFailure(FailureTimeout, ScopeRoute), ActionNextRoute},
+		{NewFailure(FailureNetwork, ScopeProvider), ActionNextRoute},
+		{NewFailure(FailureServerError, ScopeProvider), ActionNextModel},
+		{NewFailure(FailureRateLimited, ScopeProvider), ActionCooldownProvider},
+		{NewFailure(FailureUnknown, ScopeRoute), ActionStop},
+		{NewFailure(FailureServerError, ScopeRequest), ActionStop},
+	}
+	for _, tc := range cases {
+		if got := DecideFailureAction(tc.failure); got != tc.want {
+			t.Fatalf("DecideFailureAction(%+v) = %s, want %s", tc.failure, got, tc.want)
+		}
 	}
 }
 

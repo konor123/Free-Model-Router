@@ -34,7 +34,7 @@ type ReconcileResult struct {
 //   - model returns → restore previous selection
 //   - access changes (Free → Paid) → keep selection; access policy excludes from auto routing
 //   - revision conflict → error
-func (r *Reconciler) Reconcile(p *PoolState, snap *model.CatalogSnapshot) (*ReconcileResult, error) {
+func (r *Reconciler) Reconcile(p *PoolState, snap *model.CatalogSnapshot, routes map[model.ProviderModelID][]model.ProviderRoute) (*ReconcileResult, error) {
 	if p == nil || p.Config == nil {
 		return nil, fmt.Errorf("nil pool state")
 	}
@@ -63,9 +63,9 @@ func (r *Reconciler) Reconcile(p *PoolState, snap *model.CatalogSnapshot) (*Reco
 	}
 
 	// Access change detection and automatic-mode inclusion.
-	for id, pm := range snap.Models {
-		// Automatic mode: include new free/free-tier models.
-		if p.Config.Mode == ModeAutomatic && pm.Access.AutoRoutable() && !p.Config.Contains(id) {
+	for id := range snap.Models {
+		// Automatic mode: include models with an enabled free/free-tier route.
+		if p.Config.Mode == ModeAutomatic && hasAutoRoutableRoute(routes[id]) && !p.Config.Contains(id) {
 			p.Config.SelectedProviderModelIDs = append(p.Config.SelectedProviderModelIDs, id)
 			res.Added = append(res.Added, id)
 		}
@@ -81,19 +81,38 @@ func (r *Reconciler) Reconcile(p *PoolState, snap *model.CatalogSnapshot) (*Reco
 
 // DetectAccessChanges compares two snapshots for the given selected ids and
 // reports ids whose access class differs. Returns error on revision regression.
-func (r *Reconciler) DetectAccessChanges(prev, next *model.CatalogSnapshot, selected []model.ProviderModelID) ([]model.ProviderModelID, error) {
+func (r *Reconciler) DetectAccessChanges(prev, next *model.CatalogSnapshot, prevRoutes, nextRoutes map[model.ProviderModelID][]model.ProviderRoute, selected []model.ProviderModelID) ([]model.ProviderModelID, error) {
 	if prev != nil && next != nil && next.Revision < prev.Revision {
 		return nil, fmt.Errorf("revision conflict: next %d < prev %d", next.Revision, prev.Revision)
 	}
 	var changed []model.ProviderModelID
 	for _, id := range selected {
-		pmPrev, okPrev := lookup(prev, id)
-		pmNext, okNext := lookup(next, id)
-		if okPrev && okNext && pmPrev.Access != pmNext.Access {
+		_, okPrev := lookup(prev, id)
+		_, okNext := lookup(next, id)
+		if okPrev && okNext && routeAccessSignature(prevRoutes[id]) != routeAccessSignature(nextRoutes[id]) {
 			changed = append(changed, id)
 		}
 	}
 	return changed, nil
+}
+
+func hasAutoRoutableRoute(routes []model.ProviderRoute) bool {
+	for _, route := range routes {
+		if route.Enabled && route.EffectiveAccess().AutoRoutable() {
+			return true
+		}
+	}
+	return false
+}
+
+func routeAccessSignature(routes []model.ProviderRoute) string {
+	var signature string
+	for _, route := range routes {
+		if route.Enabled {
+			signature += string(route.ID) + ":" + string(route.EffectiveAccess()) + ";"
+		}
+	}
+	return signature
 }
 
 func lookup(s *model.CatalogSnapshot, id model.ProviderModelID) (model.ProviderModel, bool) {

@@ -66,6 +66,17 @@ func TestProviderModelIDRejectsPathSeparatorsInModel(t *testing.T) {
 	}
 }
 
+func TestProviderModelSeparatesInternalAndUpstreamIdentity(t *testing.T) {
+	id, err := NewProviderModelID("opencode", "b64-Y3JlYXRvci9tb2RlbA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pm := ProviderModel{ID: id, UpstreamID: "creator/model"}
+	if pm.ID == ProviderModelID("opencode/creator/model") || pm.UpstreamID != "creator/model" {
+		t.Fatalf("identities were not kept separate: %+v", pm)
+	}
+}
+
 func TestCanonicalKeyValidation(t *testing.T) {
 	if _, err := NewCanonicalModelKey("mimo-v2.5"); err != nil {
 		t.Fatalf("valid key rejected: %v", err)

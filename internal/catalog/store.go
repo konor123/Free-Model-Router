@@ -44,9 +44,10 @@ func (s *Store) Deselect(ids []model.ProviderModelID) {
 	s.Mutate(func(p *PoolState) { p.Deselect(ids) })
 }
 
-// SelectAll switches to Automatic mode.
-func (s *Store) SelectAll() {
-	s.Mutate(func(p *PoolState) { p.SelectAll() })
+// SelectAll switches to Automatic mode and immediately applies the current
+// route eligibility view.
+func (s *Store) SelectAll(catalog *model.CatalogSnapshot, routes map[model.ProviderModelID][]model.ProviderRoute) {
+	s.Mutate(func(p *PoolState) { p.SelectAll(catalog, routes) })
 }
 
 // ClearAll empties the pool.

@@ -14,17 +14,23 @@ func snapWith(pms ...model.ProviderModel) *model.CatalogSnapshot {
 	return &model.CatalogSnapshot{Revision: 1, Models: m}
 }
 
-func pm(id, access string) model.ProviderModel {
+func pm(id string) model.ProviderModel {
 	pmid, _ := model.NewProviderModelID("opencode", id)
-	return model.ProviderModel{ID: pmid, Access: model.AccessClass(access)}
+	return model.ProviderModel{ID: pmid, UpstreamID: id}
+}
+
+func routesFor(id model.ProviderModelID, access model.AccessClass, enabled bool) map[model.ProviderModelID][]model.ProviderRoute {
+	return map[model.ProviderModelID][]model.ProviderRoute{
+		id: {{ID: model.RouteID("opencode-public::" + string(id)), ModelID: id, Provider: "opencode", UpstreamModelID: "model", Access: access, Enabled: enabled}},
+	}
 }
 
 func TestNewModelAppearsAutomaticMode(t *testing.T) {
 	p := NewPoolState(&ModelPoolConfig{Mode: ModeAutomatic})
 	r := NewReconciler()
 
-	a := pm("mimo-v2.5", "Free")
-	if _, err := r.Reconcile(p, snapWith(a)); err != nil {
+	a := pm("mimo-v2.5")
+	if _, err := r.Reconcile(p, snapWith(a), routesFor(a.ID, model.AccessFree, true)); err != nil {
 		t.Fatal(err)
 	}
 	if !p.Config.Contains(a.ID) {
@@ -32,8 +38,10 @@ func TestNewModelAppearsAutomaticMode(t *testing.T) {
 	}
 
 	// Another free model appears later.
-	b := pm("glm-5.3-flash", "Free-tier")
-	if _, err := r.Reconcile(p, snapWith(a, b)); err != nil {
+	b := pm("glm-5.3-flash")
+	if _, err := r.Reconcile(p, snapWith(a, b), map[model.ProviderModelID][]model.ProviderRoute{
+		a.ID: routesFor(a.ID, model.AccessFree, true)[a.ID], b.ID: routesFor(b.ID, model.AccessFreeTier, true)[b.ID],
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if !p.Config.Contains(b.ID) {
@@ -41,8 +49,10 @@ func TestNewModelAppearsAutomaticMode(t *testing.T) {
 	}
 
 	// Paid models are not auto-included.
-	c := pm("gpt-x", "Paid")
-	if _, err := r.Reconcile(p, snapWith(a, b, c)); err != nil {
+	c := pm("gpt-x")
+	if _, err := r.Reconcile(p, snapWith(a, b, c), map[model.ProviderModelID][]model.ProviderRoute{
+		a.ID: routesFor(a.ID, model.AccessFree, true)[a.ID], b.ID: routesFor(b.ID, model.AccessFreeTier, true)[b.ID], c.ID: routesFor(c.ID, model.AccessPaid, true)[c.ID],
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if p.Config.Contains(c.ID) {
@@ -52,16 +62,16 @@ func TestNewModelAppearsAutomaticMode(t *testing.T) {
 
 func TestModelDisappearsTombstonedAndReturnsRestored(t *testing.T) {
 	p := NewPoolState(&ModelPoolConfig{Mode: ModeManual})
-	p.Select([]model.ProviderModelID{pm("mimo-v2.5", "Free").ID})
-	a := pm("mimo-v2.5", "Free")
+	p.Select([]model.ProviderModelID{pm("mimo-v2.5").ID})
+	a := pm("mimo-v2.5")
 
 	// Present initially.
-	if _, err := r1(p, snapWith(a)); err != nil {
+	if _, err := r1(p, snapWith(a), nil); err != nil {
 		t.Fatal(err)
 	}
 
 	// Disappears.
-	res, err := r1(p, snapWith())
+	res, err := r1(p, snapWith(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +83,7 @@ func TestModelDisappearsTombstonedAndReturnsRestored(t *testing.T) {
 	}
 
 	// Returns.
-	res, err = r1(p, snapWith(a))
+	res, err = r1(p, snapWith(a), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +98,10 @@ func TestModelDisappearsTombstonedAndReturnsRestored(t *testing.T) {
 func TestManualModeDoesNotAutoAdd(t *testing.T) {
 	p := NewPoolState(&ModelPoolConfig{Mode: ModeManual})
 	r := NewReconciler()
-	if _, err := r.Reconcile(p, snapWith(pm("a", "Free"), pm("b", "Free"))); err != nil {
+	a, b := pm("a"), pm("b")
+	if _, err := r.Reconcile(p, snapWith(a, b), map[model.ProviderModelID][]model.ProviderRoute{
+		a.ID: routesFor(a.ID, model.AccessFree, true)[a.ID], b.ID: routesFor(b.ID, model.AccessFree, true)[b.ID],
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if len(p.Config.SelectedProviderModelIDs) != 0 {
@@ -98,19 +111,19 @@ func TestManualModeDoesNotAutoAdd(t *testing.T) {
 
 func TestSelectSwitchesToManual(t *testing.T) {
 	p := NewPoolState(&ModelPoolConfig{Mode: ModeAutomatic})
-	p.Select([]model.ProviderModelID{pm("x", "Free").ID})
+	p.Select([]model.ProviderModelID{pm("x").ID})
 	if p.Config.Mode != ModeManual {
 		t.Fatalf("expected Manual after explicit select, got %q", p.Config.Mode)
 	}
 }
 
 func TestDetectAccessChanges(t *testing.T) {
-	prev := snapWith(pm("mimo-v2.5", "Free"))
-	next := snapWith(pm("mimo-v2.5", "Paid"))
+	prev := snapWith(pm("mimo-v2.5"))
+	next := snapWith(pm("mimo-v2.5"))
 	r := NewReconciler()
 	id, _ := model.NewProviderModelID("opencode", "mimo-v2.5")
 
-	changed, err := r.DetectAccessChanges(prev, next, []model.ProviderModelID{id})
+	changed, err := r.DetectAccessChanges(prev, next, routesFor(id, model.AccessFree, true), routesFor(id, model.AccessPaid, true), []model.ProviderModelID{id})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +141,7 @@ func TestRevisionConflictDetected(t *testing.T) {
 	prev := &model.CatalogSnapshot{Revision: 10, Models: map[model.ProviderModelID]model.ProviderModel{}}
 	next := &model.CatalogSnapshot{Revision: 5, Models: map[model.ProviderModelID]model.ProviderModel{}}
 	r := NewReconciler()
-	if _, err := r.DetectAccessChanges(prev, next, nil); err == nil {
+	if _, err := r.DetectAccessChanges(prev, next, nil, nil, nil); err == nil {
 		t.Fatal("expected revision conflict error")
 	}
 }
@@ -141,9 +154,21 @@ func TestClearAllEmptyPool(t *testing.T) {
 	}
 }
 
+func TestSelectAllImmediatelyAddsEligibleRoutes(t *testing.T) {
+	free, paid := pm("free"), pm("paid")
+	p := NewPoolState(&ModelPoolConfig{Mode: ModeManual})
+	p.SelectAll(snapWith(free, paid), map[model.ProviderModelID][]model.ProviderRoute{
+		free.ID: routesFor(free.ID, model.AccessFreeTier, true)[free.ID],
+		paid.ID: routesFor(paid.ID, model.AccessPaid, true)[paid.ID],
+	})
+	if !p.Config.Contains(free.ID) || p.Config.Contains(paid.ID) {
+		t.Fatalf("SelectAll should include only eligible models: %v", p.Config.SelectedProviderModelIDs)
+	}
+}
+
 // helpers to keep tests terse.
-func r1(p *PoolState, s *model.CatalogSnapshot) (*ReconcileResult, error) {
-	return NewReconciler().Reconcile(p, s)
+func r1(p *PoolState, s *model.CatalogSnapshot, routes map[model.ProviderModelID][]model.ProviderRoute) (*ReconcileResult, error) {
+	return NewReconciler().Reconcile(p, s, routes)
 }
 
 func p1(id model.ProviderModelID) *PoolState {

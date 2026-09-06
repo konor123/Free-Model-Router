@@ -16,18 +16,16 @@ const AuthRouteEnv = "OPENCODE_API_KEY"
 // AuthBaseURL is the Zen authenticated endpoint base.
 const AuthBaseURL = "https://opencode.ai/zen/v1"
 
-// AuthRoute builds the canonical Zen auth route for a model id.
-func AuthRoute(pmid model.ProviderModelID) model.ProviderRoute {
-	mdl := ""
-	if _, m, err := pmid.Parse(); err == nil {
-		mdl = m
-	}
-	rid, _ := model.NewRouteID(AuthRouteName, mdl)
+// AuthRoute builds the canonical Zen auth route for a model id. Configuring a
+// key alone does not establish a free-tier or paid-use entitlement.
+func AuthRoute(pmid model.ProviderModelID, upstreamID string) model.ProviderRoute {
+	rid, _ := model.NewRouteID(AuthRouteName, upstreamID)
 	return model.ProviderRoute{
-		ID:      rid,
-		ModelID: pmid,
-		// Authenticated Zen route is free-tier (quota applies per account).
-		Access:  model.AccessFreeTier,
+		ID:              rid,
+		ModelID:         pmid,
+		Provider:        ProviderID,
+		UpstreamModelID: upstreamID,
+		Access:          model.AccessUnknown,
 		Enabled: true,
 		CapabilityOverride: &model.Capabilities{
 			Streaming:        true,
@@ -46,10 +44,10 @@ func AuthKey() string {
 
 // RoutesFor returns all enabled routes for a model given the current auth state.
 // No key → Public only. Key present → Public + Zen Auth (PLAN_V7 §9).
-func Routes(pmid model.ProviderModelID, caps model.Capabilities, access model.AccessClass) []model.ProviderRoute {
-	routes := []model.ProviderRoute{PublicRoute(pmid, caps, access)}
+func Routes(pmid model.ProviderModelID, upstreamID string, caps model.Capabilities) []model.ProviderRoute {
+	routes := []model.ProviderRoute{PublicRoute(pmid, upstreamID, caps)}
 	if AuthKey() != "" {
-		routes = append(routes, AuthRoute(pmid))
+		routes = append(routes, AuthRoute(pmid, upstreamID))
 	}
 	return routes
 }

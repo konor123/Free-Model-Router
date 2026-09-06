@@ -128,15 +128,19 @@ type ProviderModel struct {
 	CanonicalKey CanonicalModelKey `json:"canonicalKey"`
 	DisplayName  string            `json:"displayName"`
 	Base         Capabilities      `json:"baseCapabilities"`
-	Access       AccessClass       `json:"access"`
+	// UpstreamID is the opaque identifier sent to the provider. It is kept
+	// separate from ID because provider-native identifiers may contain '/'.
+	UpstreamID string `json:"upstreamId"`
 }
 
 // ProviderRoute is one concrete endpoint/auth path of a ProviderModel.
 // Route state (health, TTFT, cooldown, quota) is per-route (PLAN_V7 §9).
 type ProviderRoute struct {
-	ID      RouteID     `json:"id"`
-	ModelID ProviderModelID `json:"modelId"`
-	Access  AccessClass `json:"access"`
+	ID              RouteID         `json:"id"`
+	ModelID         ProviderModelID `json:"modelId"`
+	Provider        string          `json:"provider"`
+	UpstreamModelID string          `json:"upstreamModelId"`
+	Access          AccessClass     `json:"access"`
 
 	// Capability overrides intersect with the model base capabilities.
 	CapabilityOverride *Capabilities `json:"capabilityOverride,omitempty"`
@@ -153,8 +157,17 @@ func (r *ProviderRoute) EffectiveCapabilities(base Capabilities) Capabilities {
 	return base.Intersect(*r.CapabilityOverride)
 }
 
+// EffectiveAccess resolves the authoritative access of the route itself.
+// An omitted access classification is deliberately fail-closed as Unknown.
+func (r *ProviderRoute) EffectiveAccess() AccessClass {
+	if r.Access == "" {
+		return AccessUnknown
+	}
+	return r.Access
+}
+
 // RouteAccess resolves the authoritative access of the route itself.
-func (r *ProviderRoute) RouteAccess() AccessClass { return r.Access }
+func (r *ProviderRoute) RouteAccess() AccessClass { return r.EffectiveAccess() }
 
 // Validate performs basic entity invariants.
 func (r *ProviderRoute) Validate() error {
@@ -164,7 +177,13 @@ func (r *ProviderRoute) Validate() error {
 	if r.ModelID == "" {
 		return fmt.Errorf("route model id must not be empty")
 	}
-	if r.Access != AccessUnknown && r.Access != AccessFree && r.Access != AccessFreeTier && r.Access != AccessPaid {
+	if r.Provider == "" {
+		return fmt.Errorf("route provider must not be empty")
+	}
+	if r.UpstreamModelID == "" {
+		return fmt.Errorf("route upstream model id must not be empty")
+	}
+	if r.EffectiveAccess() != AccessUnknown && r.EffectiveAccess() != AccessFree && r.EffectiveAccess() != AccessFreeTier && r.EffectiveAccess() != AccessPaid {
 		return fmt.Errorf("invalid route access %q", r.Access)
 	}
 	return nil
