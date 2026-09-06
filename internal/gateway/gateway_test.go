@@ -9,9 +9,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/konor123/Free-Model-Router/internal/model"
 	"github.com/konor123/Free-Model-Router/internal/provider"
+	"github.com/konor123/Free-Model-Router/internal/providers/opencode"
 )
 
 // mockOpenCode is a controllable OpenCode-compatible backend.
@@ -65,7 +67,7 @@ func (f fakeProvider) DiscoverModels(ctx context.Context) (*model.CatalogSnapsho
 		if err != nil {
 			continue
 		}
-		snap.Models[pmid] = model.ProviderModel{ID: pmid, Access: model.AccessFree}
+		snap.Models[pmid] = model.ProviderModel{ID: pmid, UpstreamID: e.ID}
 	}
 	return snap, nil
 }
@@ -182,6 +184,98 @@ func TestChatCompletionUnknownModelRejected(t *testing.T) {
 	}
 }
 
+func TestRefreshCatalogProjectsRoutesAndAutomaticPool(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":[{"id":"mimo-v2.5"},{"id":"glm-5.3-flash"}]}`))
+	}))
+	defer backend.Close()
+	g, err := NewGateway(context.Background(), fakeProvider{base: backend.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(g.routes) != 2 {
+		t.Fatalf("projected route models = %d, want 2", len(g.routes))
+	}
+	for id, routes := range g.routes {
+		if len(routes) == 0 || routes[0].Provider != "opencode" || routes[0].UpstreamModelID == "" {
+			t.Fatalf("invalid projected route for %s: %+v", id, routes)
+		}
+		if !g.pool.Snapshot().Contains(id) {
+			t.Fatalf("automatic pool missing %s", id)
+		}
+	}
+}
+
+func TestModelsListReflectsLivePool(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":[{"id":"first"},{"id":"second"}]}`))
+	}))
+	defer backend.Close()
+	g, err := NewGateway(context.Background(), fakeProvider{base: backend.URL})
+	if err != nil { t.Fatal(err) }
+	second, _ := model.NewProviderModelID("opencode", "second")
+	g.pool.Deselect([]model.ProviderModelID{second})
+	w := httptest.NewRecorder()
+	g.ModelsHandler(w, httptest.NewRequest("GET", "/v1/models", nil))
+	if strings.Contains(w.Body.String(), string(second)) || !strings.Contains(w.Body.String(), "opencode/first") {
+		t.Fatalf("models must reflect live pool: %s", w.Body.String())
+	}
+}
+
+func TestRefreshCatalogKeepsAuthRouteUnknownAndPublicIsolated(t *testing.T) {
+	t.Setenv(opencode.AuthRouteEnv, "test-key")
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":[{"id":"m"}]}`))
+	}))
+	defer backend.Close()
+	g, err := NewGateway(context.Background(), fakeProvider{base: backend.URL})
+	if err != nil { t.Fatal(err) }
+	id, _ := model.NewProviderModelID("opencode", "m")
+	routes := g.routes[id]
+	if len(routes) != 2 || routes[0].EffectiveAccess() != model.AccessFree || routes[1].EffectiveAccess() != model.AccessUnknown {
+		t.Fatalf("expected isolated public/free and auth/unknown routes: %+v", routes)
+	}
+	g.health.RouteFailure(string(routes[0].ID), time.Minute)
+	if !g.health.Available(string(routes[1].ID)) {
+		t.Fatal("public failure must not affect auth route health")
+	}
+}
+
+func TestResolveCandidateFiltersToolsAndVision(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":[{"id":"tools"},{"id":"vision"}]}`))
+	}))
+	defer backend.Close()
+	g, err := NewGateway(context.Background(), fakeProvider{base: backend.URL})
+	if err != nil { t.Fatal(err) }
+	toolsID, _ := model.NewProviderModelID("opencode", "tools")
+	visionID, _ := model.NewProviderModelID("opencode", "vision")
+	tools := g.catalog.Models[toolsID]; tools.Base = model.Capabilities{Tools: true}; g.catalog.Models[toolsID] = tools
+	vision := g.catalog.Models[visionID]; vision.Base = model.Capabilities{Vision: true}; g.catalog.Models[visionID] = vision
+	if pick, _, ok := g.resolveCandidate(chatCompletionRequest{Tools: []gatewayTool{{}}}); !ok || pick != toolsID {
+		t.Fatalf("tools request selected %q, want %q", pick, toolsID)
+	}
+	if pick, _, ok := g.resolveCandidate(chatCompletionRequest{Messages: []provider.Message{{Role: "user", Content: []any{map[string]any{"type": "image_url"}}}}}); !ok || pick != visionID {
+		t.Fatalf("vision request selected %q, want %q", pick, visionID)
+	}
+}
+
+func TestChatCompletionRejectsUnknownParameter(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":[{"id":"mimo-v2.5"}]}`))
+	}))
+	defer backend.Close()
+	g, err := NewGateway(context.Background(), fakeProvider{base: backend.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	g.ChatHandler(w, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"x"}],"unknown_knob":true}`)))
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "unsupported parameter unknown_knob") {
+		t.Fatalf("unknown parameter should be explicitly rejected: %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestChatCompletionStreaming(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/models" {
@@ -189,8 +283,8 @@ func TestChatCompletionStreaming(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"he\"}}]}\n\n" +
-			"data: {\"choices\":[{\"delta\":{\"content\":\"y\"}}]}\n\n" +
+		w.Write([]byte("data: {\"choices\":[{\"index\":4,\"delta\":{\"content\":\"he\"}}]}\n\n" +
+			"data: {\"choices\":[{\"index\":4,\"delta\":{\"content\":\"y\"}}]}\n\n" +
 			"data: [DONE]\n\n"))
 	}))
 	defer backend.Close()
@@ -206,6 +300,9 @@ func TestChatCompletionStreaming(t *testing.T) {
 
 	if !strings.Contains(w.Body.String(), `"content":"he"`) {
 		t.Fatalf("missing delta: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"index":4`) {
+		t.Fatalf("missing choice index: %s", w.Body.String())
 	}
 	if !strings.Contains(w.Body.String(), "[DONE]") {
 		t.Fatal("missing [DONE]")
@@ -251,6 +348,7 @@ func (s *sseFakeStream) Next(ctx context.Context) (provider.StreamEvent, error) 
 	}
 	var raw struct {
 		Choices []struct {
+			Index int `json:"index"`
 			Delta struct {
 				Content string `json:"content"`
 			} `json:"delta"`
@@ -262,7 +360,7 @@ func (s *sseFakeStream) Next(ctx context.Context) (provider.StreamEvent, error) 
 	if len(raw.Choices) == 0 || raw.Choices[0].Delta.Content == "" {
 		return s.Next(ctx)
 	}
-	return provider.StreamEvent{DeltaText: raw.Choices[0].Delta.Content}, nil
+	return provider.StreamEvent{ChoiceIndex: raw.Choices[0].Index, DeltaText: raw.Choices[0].Delta.Content}, nil
 }
 func (s *sseFakeStream) Close() error { return nil }
 

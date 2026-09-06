@@ -16,17 +16,15 @@ import (
 
 // chatRequest is the OpenAI-compatible chat completion payload.
 type chatRequest struct {
-	Model       string        `json:"model"`
-	Messages    []chatMessage `json:"messages"`
-	Stream      bool          `json:"stream,omitempty"`
-	MaxTokens   int           `json:"max_tokens,omitempty"`
-	Temperature *float64      `json:"temperature,omitempty"`
-	Tools       []chatTool    `json:"tools,omitempty"`
-}
-
-type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Model          string             `json:"model"`
+	Messages       []provider.Message `json:"messages"`
+	Stream         bool               `json:"stream,omitempty"`
+	MaxTokens      int                `json:"max_tokens,omitempty"`
+	Temperature    *float64           `json:"temperature,omitempty"`
+	Tools          []chatTool         `json:"tools,omitempty"`
+	ToolChoice     json.RawMessage    `json:"tool_choice,omitempty"`
+	ResponseFormat json.RawMessage    `json:"response_format,omitempty"`
+	Reasoning      json.RawMessage    `json:"reasoning,omitempty"`
 }
 
 type chatTool struct {
@@ -44,13 +42,7 @@ type chatToolFunc struct {
 // Route isolation: auth route (opencode-zen::) targets the Zen base URL with a
 // Bearer key; public route targets the anonymous base URL with no credentials.
 func (p *Provider) ChatCompletion(ctx context.Context, route model.ProviderRoute, req provider.NormalizedRequest) (provider.ChatStream, error) {
-	pmid := route.ModelID
-	_, mdl, err := pmid.Parse()
-	if err != nil {
-		return nil, provider.NewFailureError(model.NewFailure(model.FailureBadRequest, model.ScopeRequest), err)
-	}
-
-	payload, err := buildPayload(mdl, req)
+	payload, err := buildPayload(route.UpstreamModelID, req)
 	if err != nil {
 		return nil, err
 	}
@@ -129,21 +121,33 @@ func (p *Provider) ChatCompletion(ctx context.Context, route model.ProviderRoute
 	if ev.DeltaText == "" && out.Choices[0].Message.Content != "" {
 		ev.DeltaText = out.Choices[0].Message.Content
 	}
+	ev.ReasoningContent = out.Choices[0].Message.ReasoningContent
+	for _, toolCall := range out.Choices[0].Message.ToolCalls {
+		raw, err := json.Marshal(toolCall)
+		if err != nil {
+			return nil, provider.NewFailureError(model.NewFailure(model.FailureProtocol, model.ScopeRoute), err)
+		}
+		ev.ToolCalls = append(ev.ToolCalls, raw)
+	}
 	drain(resp.Body)
 	return &oneShotStream{ev: ev, done: false}, nil
 }
 
 func buildPayload(mdl string, req provider.NormalizedRequest) ([]byte, error) {
 	cr := chatRequest{
-		Model:       mdl,
-		Stream:      req.Stream,
-		MaxTokens:   req.MaxTokens,
-		Temperature: req.Temperature,
-	}
-	for _, m := range req.Messages {
-		cr.Messages = append(cr.Messages, chatMessage{Role: m.Role, Content: m.Content})
+		Model:          mdl,
+		Messages:       req.Messages,
+		Stream:         req.Stream,
+		MaxTokens:      req.MaxTokens,
+		Temperature:    req.Temperature,
+		ToolChoice:     req.ToolChoice,
+		ResponseFormat: req.ResponseFormat,
+		Reasoning:      req.Reasoning,
 	}
 	for _, t := range req.Tools {
+		if t.Type != "" && t.Type != "function" {
+			return nil, &provider.UnsupportedError{Parameter: "tools[].type", Reason: "only function tools are supported by opencode public route"}
+		}
 		cr.Tools = append(cr.Tools, chatTool{Type: "function", Function: chatToolFunc{
 			Name: t.Name, Description: t.Description, Parameters: json.RawMessage(t.Schema),
 		}})
@@ -163,7 +167,9 @@ func buildPayload(mdl string, req provider.NormalizedRequest) ([]byte, error) {
 type chatResponse struct {
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content          string              `json:"content"`
+			ToolCalls        []provider.ToolCall `json:"tool_calls"`
+			ReasoningContent string              `json:"reasoning_content"`
 		} `json:"message"`
 		Delta        string `json:"delta"`
 		FinishReason string `json:"finish_reason"`
@@ -186,6 +192,7 @@ type sseStream struct {
 
 type sseChunk struct {
 	Choices []struct {
+		Index int `json:"index"`
 		Delta struct {
 			Content          string            `json:"content"`
 			ReasoningContent string            `json:"reasoning_content"`
@@ -226,7 +233,7 @@ func (s *sseStream) Next(ctx context.Context) (provider.StreamEvent, error) {
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
 			s.done = true
-			return provider.StreamEvent{FinishReason: "stop"}, nil
+			return provider.StreamEvent{}, io.EOF
 		}
 		var chunk sseChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
@@ -239,12 +246,13 @@ func (s *sseStream) Next(ctx context.Context) (provider.StreamEvent, error) {
 		}
 		c := chunk.Choices[0]
 		ev := provider.StreamEvent{
-			DeltaText:      c.Delta.Content,
-			ReasoningDelta: c.Delta.ReasoningContent != "",
-			FinishReason:   c.FinishReason,
+			ChoiceIndex:      c.Index,
+			DeltaText:        c.Delta.Content,
+			ReasoningContent: c.Delta.ReasoningContent,
+			FinishReason:     c.FinishReason,
 		}
 		if len(c.Delta.ToolCalls) > 0 {
-			ev.ToolCallDelta = true
+			ev.ToolCalls = append(ev.ToolCalls, c.Delta.ToolCalls...)
 		}
 		if ev.Semantic() {
 			return ev, nil

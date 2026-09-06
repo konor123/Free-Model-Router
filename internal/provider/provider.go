@@ -5,6 +5,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 
 	"github.com/konor123/Free-Model-Router/internal/model"
@@ -28,10 +29,12 @@ type ChatStream interface {
 type StreamEvent struct {
 	// DeltaText is an incremental content delta ("" if not a text event).
 	DeltaText string
-	// ToolCallDelta is set when the event carries tool-call fragments.
-	ToolCallDelta bool
-	// ReasoningDelta is set when the event carries reasoning fragments.
-	ReasoningDelta bool
+	// ChoiceIndex identifies the response choice carrying this delta.
+	ChoiceIndex int
+	// ToolCalls preserves the complete upstream tool-call delta objects.
+	ToolCalls []json.RawMessage
+	// ReasoningContent is the incremental reasoning delta.
+	ReasoningContent string
 	// FinishReason is set on the final event ("stop", "tool_calls", ...).
 	FinishReason string
 }
@@ -39,7 +42,7 @@ type StreamEvent struct {
 // Semantic reports whether this event carries user-visible semantics.
 // Heartbeats/comments/empty deltas are not semantic (PLAN_V7 §12).
 func (e StreamEvent) Semantic() bool {
-	return e.DeltaText != "" || e.ToolCallDelta || e.ReasoningDelta || e.FinishReason != ""
+	return e.DeltaText != "" || len(e.ToolCalls) > 0 || e.ReasoningContent != "" || e.FinishReason != ""
 }
 
 // ChatProvider executes a chat completion against one route.
@@ -60,6 +63,9 @@ type Provider interface {
 type NormalizedRequest struct {
 	Messages    []Message            `json:"messages"`
 	Tools       []ToolSpec           `json:"tools,omitempty"`
+	ToolChoice  json.RawMessage      `json:"tool_choice,omitempty"`
+	ResponseFormat json.RawMessage   `json:"response_format,omitempty"`
+	Reasoning   json.RawMessage      `json:"reasoning,omitempty"`
 	Stream      bool                 `json:"stream"`
 	MaxTokens   int                  `json:"maxTokens,omitempty"`
 	Temperature *float64             `json:"temperature,omitempty"`
@@ -68,12 +74,40 @@ type NormalizedRequest struct {
 
 // Message is one normalized chat message.
 type Message struct {
-	Role    string `json:"role"` // system | user | assistant | tool
-	Content string `json:"content"`
+	Role       string          `json:"role"` // system | user | assistant | tool
+	Content    any             `json:"content"`
+	ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
+	ToolCallID string          `json:"tool_call_id,omitempty"`
+	Name       string          `json:"name,omitempty"`
+}
+
+// ContentPart is one supported multimodal content fragment.
+type ContentPart struct {
+	Type     string    `json:"type"`
+	Text     string    `json:"text,omitempty"`
+	ImageURL *ImageURL `json:"image_url,omitempty"`
+}
+
+type ImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// ToolCall is a complete assistant tool call or a streaming fragment.
+type ToolCall struct {
+	ID       string       `json:"id,omitempty"`
+	Type     string       `json:"type,omitempty"`
+	Function FunctionCall `json:"function"`
+}
+
+type FunctionCall struct {
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
 }
 
 // ToolSpec declares a tool the client exposes.
 type ToolSpec struct {
+	Type        string `json:"type,omitempty"`
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	// Schema is the raw JSON schema for parameters.
