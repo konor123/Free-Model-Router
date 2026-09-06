@@ -268,7 +268,11 @@ type ProviderRoute struct {
 	ModelID         ProviderModelID `json:"modelId"`
 	Provider        string          `json:"provider"`
 	UpstreamModelID string          `json:"upstreamModelId"`
-	Access          AccessClass     `json:"access"`
+	// CredentialID groups routes that share the same credential. An empty
+	// value is allowed for legacy callers and is derived from RouteID by the
+	// gateway fallback policy.
+	CredentialID string      `json:"credentialId,omitempty"`
+	Access       AccessClass `json:"access"`
 
 	// Capability overrides intersect with the model base capabilities.
 	CapabilityOverride *Capabilities `json:"capabilityOverride,omitempty"`

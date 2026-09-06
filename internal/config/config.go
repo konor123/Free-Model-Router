@@ -1,4 +1,4 @@
-// Package config loads and persists AFM configuration.
+// Package config loads and persists FMR configuration.
 // Phase 0 covers loading, defaults, and atomic writes; schema migration lands in Phase 11.
 package config
 

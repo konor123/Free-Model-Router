@@ -133,8 +133,11 @@ func TestModelsListContainsAutoAndDiscovered(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("status %d: %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"afm/auto"`) {
-		t.Fatal("missing afm/auto in /v1/models")
+	if !strings.Contains(w.Body.String(), `"fmr/auto"`) {
+		t.Fatal("missing fmr/auto in /v1/models")
+	}
+	if !strings.Contains(w.Body.String(), `"owned_by":"fmr"`) {
+		t.Fatalf("models must use FMR ownership metadata: %s", w.Body.String())
 	}
 	if !strings.Contains(w.Body.String(), "opencode/mimo-v2.5") {
 		t.Fatal("missing discovered model in /v1/models")
@@ -155,7 +158,7 @@ func TestChatCompletionEndToEndNonStreaming(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := `{"model":"afm/auto","messages":[{"role":"user","content":"ping"}]}`
+	body := `{"model":"fmr/auto","messages":[{"role":"user","content":"ping"}]}`
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	g.ChatHandler(w, r)
@@ -164,6 +167,9 @@ func TestChatCompletionEndToEndNonStreaming(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "pong") {
 		t.Fatalf("missing content: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "chatcmpl-fmr") {
+		t.Fatalf("response must use the FMR completion id: %s", w.Body.String())
 	}
 }
 
@@ -286,6 +292,33 @@ func TestChatCompletionRejectsUnknownParameter(t *testing.T) {
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "unsupported parameter unknown_knob") {
 		t.Fatalf("unknown parameter should be explicitly rejected: %d %s", w.Code, w.Body.String())
 	}
+	if !strings.Contains(w.Body.String(), `"type":"fmr_error"`) {
+		t.Fatalf("error response must use the FMR error type: %s", w.Body.String())
+	}
+}
+
+func TestResolveCandidateFiltersMaxOutput(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":[{"id":"a-small"},{"id":"b-large"}]}`))
+	}))
+	defer backend.Close()
+	g, err := NewGateway(context.Background(), fakeProvider{base: backend.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	smallID, _ := model.NewProviderModelID("opencode", "a-small")
+	largeID, _ := model.NewProviderModelID("opencode", "b-large")
+	small := g.catalog.Models[smallID]
+	small.Base = model.Capabilities{Streaming: true, MaxOutput: 32}
+	g.catalog.Models[smallID] = small
+	large := g.catalog.Models[largeID]
+	large.Base = model.Capabilities{Streaming: true, MaxOutput: 256}
+	g.catalog.Models[largeID] = large
+
+	pick, _, ok := g.resolveCandidate(chatCompletionRequest{MaxTokens: 128})
+	if !ok || pick != largeID {
+		t.Fatalf("max-output request selected %q, want %q", pick, largeID)
+	}
 }
 
 func TestChatCompletionStreaming(t *testing.T) {
@@ -307,11 +340,14 @@ func TestChatCompletionStreaming(t *testing.T) {
 	}
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions",
-		strings.NewReader(`{"model":"afm/auto","stream":true,"messages":[{"role":"user","content":"x"}]}`))
+		strings.NewReader(`{"model":"fmr/auto","stream":true,"messages":[{"role":"user","content":"x"}]}`))
 	g.ChatHandler(w, r)
 
 	if !strings.Contains(w.Body.String(), `"content":"he"`) {
 		t.Fatalf("missing delta: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"id":"chatcmpl-fmr"`) {
+		t.Fatalf("stream must use the FMR completion id: %s", w.Body.String())
 	}
 	if !strings.Contains(w.Body.String(), `"index":4`) {
 		t.Fatalf("missing choice index: %s", w.Body.String())
@@ -445,7 +481,7 @@ func TestStreamingFailureBeforeSemanticDoesNotCommit(t *testing.T) {
 	})
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(
-		`{"model":"afm/auto","stream":true,"messages":[{"role":"user","content":"x"}]}`))
+		`{"model":"fmr/auto","stream":true,"messages":[{"role":"user","content":"x"}]}`))
 	g.ChatHandler(w, r)
 
 	if w.Code != http.StatusBadGateway {
@@ -469,7 +505,7 @@ func TestStreamingFailureAfterSemanticCommitsAndRecordsMetrics(t *testing.T) {
 	})
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(
-		`{"model":"afm/auto","stream":true,"messages":[{"role":"user","content":"x"}]}`))
+		`{"model":"fmr/auto","stream":true,"messages":[{"role":"user","content":"x"}]}`))
 	g.ChatHandler(w, r)
 
 	if w.Code != http.StatusOK || !strings.Contains(w.Header().Get("Content-Type"), "text/event-stream") {
@@ -496,7 +532,7 @@ func TestNonStreamingRecordsTTFTAndTotalMetrics(t *testing.T) {
 	})
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(
-		`{"model":"afm/auto","messages":[{"role":"user","content":"x"}]}`))
+		`{"model":"fmr/auto","messages":[{"role":"user","content":"x"}]}`))
 	g.ChatHandler(w, r)
 
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "ok") {

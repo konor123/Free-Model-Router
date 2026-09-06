@@ -1,4 +1,4 @@
-// Command Free-Model-Router is the AFM gateway binary.
+// Command Free-Model-Router is the FMR gateway binary.
 // Phase 0: boots config + logging, prints startup info, exits cleanly.
 package main
 
@@ -34,8 +34,8 @@ func main() {
 	defer stop()
 
 	if err := app.Run(ctx, cfg, log); err != nil {
-		log.Error("afm exited with error: %v", err)
+		log.Error("FMR exited with error: %v", err)
 		os.Exit(1)
 	}
-	log.Info("afm shut down cleanly")
+	log.Info("FMR shut down cleanly")
 }

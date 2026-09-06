@@ -4,6 +4,8 @@
 package router
 
 import (
+	"sort"
+
 	"github.com/konor123/Free-Model-Router/internal/health"
 	"github.com/konor123/Free-Model-Router/internal/model"
 )
@@ -52,6 +54,11 @@ type FilterInput struct {
 	// AllowPaid enables paid routes (explicit opt-in only).
 	AllowPaid bool
 
+	// AllowUnknown enables a controlled alternate-route lookup. Unknown access
+	// remains excluded by default and should only be enabled for a route that is
+	// already paired with an eligible model candidate.
+	AllowUnknown bool
+
 	// ProtocolCompatible optionally vetoes candidates whose protocol cannot
 	// express the request (nil = no veto).
 	ProtocolCompatible func(model.ProviderRoute) bool
@@ -62,8 +69,8 @@ type FilterInput struct {
 
 // Filter applies the eligibility chain:
 //
-//	1. explicit model intent  2. model pool  3. capability
-//	4. protocol               5. access
+//  1. explicit model intent  2. model pool  3. capability
+//  4. protocol               5. access
 //
 // Capability mismatch is removed before scoring. Fallback callers must reuse
 // the same FilterInput so every attempt keeps identical requirements.
@@ -109,7 +116,7 @@ func Filter(in FilterInput) EligibilityResult {
 				res.Excluded = append(res.Excluded, Exclusion{ID: id, Reason: "health unavailable"})
 				continue
 			}
-			if !routeAccessAllowed(route.EffectiveAccess(), in.AllowPaid) {
+			if !routeAccessAllowed(route.EffectiveAccess(), in.AllowPaid, in.AllowUnknown) {
 				res.Excluded = append(res.Excluded, Exclusion{ID: id, Reason: "access not allowed"})
 				continue
 			}
@@ -119,14 +126,47 @@ func Filter(in FilterInput) EligibilityResult {
 	return res
 }
 
-func routeAccessAllowed(a model.AccessClass, allowPaid bool) bool {
+func routeAccessAllowed(a model.AccessClass, allowPaid, allowUnknown bool) bool {
 	if a.AutoRoutable() {
 		return true
 	}
 	if a == model.AccessPaid {
 		return allowPaid
 	}
-	return false // Unknown never auto-routes (PLAN_V7: unknown access is not free)
+	if a == model.AccessUnknown {
+		return allowUnknown
+	}
+	return false // Unclassified access never routes without an explicit policy.
+}
+
+// TTFTLookup returns the current routing latency estimate for a route.
+// Returning ok=false means that no probe or request sample is available yet.
+type TTFTLookup func(routeID string) (ms float64, ok bool)
+
+// Rank returns a deterministic copy of candidates ordered by known TTFT,
+// then ProviderModelID, then RouteID. Health and eligibility filtering happen
+// before ranking, so unavailable routes are never resurrected by this helper.
+func Rank(candidates []Candidate, ttft TTFTLookup) []Candidate {
+	out := append([]Candidate(nil), candidates...)
+	sort.SliceStable(out, func(i, j int) bool {
+		left, leftOK := 0.0, false
+		right, rightOK := 0.0, false
+		if ttft != nil {
+			left, leftOK = ttft(string(out[i].Route.ID))
+			right, rightOK = ttft(string(out[j].Route.ID))
+		}
+		if leftOK != rightOK {
+			return leftOK
+		}
+		if leftOK && left != right {
+			return left < right
+		}
+		if out[i].Model.ID != out[j].Model.ID {
+			return string(out[i].Model.ID) < string(out[j].Model.ID)
+		}
+		return string(out[i].Route.ID) < string(out[j].Route.ID)
+	})
+	return out
 }
 
 // ids resolves the candidate id list: explicit wins, else pool.

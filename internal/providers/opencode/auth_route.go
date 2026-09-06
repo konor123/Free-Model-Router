@@ -25,8 +25,9 @@ func AuthRoute(pmid model.ProviderModelID, upstreamID string) model.ProviderRout
 		ModelID:         pmid,
 		Provider:        ProviderID,
 		UpstreamModelID: upstreamID,
+		CredentialID:    AuthRouteName,
 		Access:          model.AccessUnknown,
-		Enabled: true,
+		Enabled:         true,
 		CapabilityOverride: &model.Capabilities{
 			Streaming:        true,
 			Tools:            true,

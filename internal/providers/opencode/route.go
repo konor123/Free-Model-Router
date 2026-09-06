@@ -26,8 +26,9 @@ func PublicRoute(pmid model.ProviderModelID, upstreamID string, caps model.Capab
 		ModelID:         pmid,
 		Provider:        ProviderID,
 		UpstreamModelID: upstreamID,
+		CredentialID:    PublicRouteName,
 		Access:          model.AccessFree,
-		Enabled: true,
+		Enabled:         true,
 		// Protocol-level capabilities intersected with model base capabilities.
 		CapabilityOverride: &model.Capabilities{
 			Streaming:        true,

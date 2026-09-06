@@ -85,12 +85,12 @@ func TestRunWithProviderWiresRealHTTPAppPath(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if !strings.Contains(string(models), `"afm/auto"`) || !strings.Contains(string(models), "opencode/mimo-v2.5") {
+	if !strings.Contains(string(models), `"fmr/auto"`) || !strings.Contains(string(models), "opencode/mimo-v2.5") {
 		t.Fatalf("app did not expose the live catalog: %s", models)
 	}
 
 	resp, err := http.Post(baseURL+"/v1/chat/completions", "application/json", strings.NewReader(
-		`{"model":"afm/auto","messages":[{"role":"user","content":"ping"}]}`))
+		`{"model":"fmr/auto","messages":[{"role":"user","content":"ping"}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
