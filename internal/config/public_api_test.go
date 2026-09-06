@@ -91,3 +91,40 @@ func TestAppLoadConfigUsesPersistedConfigContract(t *testing.T) {
 		t.Fatal("app.LoadConfig removed migrated config")
 	}
 }
+
+func TestPublicDefaultLocationsAndSecretEnvironmentOverride(t *testing.T) {
+	configRoot := t.TempDir()
+	cacheRoot := t.TempDir()
+	// Set all supported user-data variables. Only the variables relevant to the
+	// current OS are consulted by os.UserConfigDir/UserCacheDir.
+	t.Setenv("APPDATA", configRoot)
+	t.Setenv("LOCALAPPDATA", cacheRoot)
+	t.Setenv("XDG_CONFIG_HOME", configRoot)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+
+	configPath, err := config.DefaultPath()
+	if err != nil {
+		t.Fatalf("DefaultPath: %v", err)
+	}
+	cachePath, err := config.DefaultCachePath("snapshot.json")
+	if err != nil {
+		t.Fatalf("DefaultCachePath: %v", err)
+	}
+	if filepath.Base(filepath.Dir(configPath)) != config.ApplicationName || filepath.Base(filepath.Dir(cachePath)) != config.ApplicationName {
+		t.Fatalf("unexpected default state paths: config=%q cache=%q", configPath, cachePath)
+	}
+	loaded, err := app.LoadConfig("")
+	if err != nil {
+		t.Fatalf("app.LoadConfig default path: %v", err)
+	}
+	if loaded.Bind == "" || loaded.SchemaVersion != config.CurrentSchemaVersion {
+		t.Fatalf("default config contract mismatch: %+v", loaded)
+	}
+
+	const key = "FMR_DEFAULT_SECRET_ENV"
+	t.Setenv(key, "environment-only-value")
+	store := config.NewSecretStore()
+	if got, err := store.Get(key); err != nil || got != "environment-only-value" {
+		t.Fatalf("default SecretStore environment override: got %q, err %v", got, err)
+	}
+}
