@@ -8,6 +8,7 @@ import (
 	"github.com/konor123/Free-Model-Router/internal/catalog"
 	"github.com/konor123/Free-Model-Router/internal/health"
 	"github.com/konor123/Free-Model-Router/internal/model"
+	"github.com/konor123/Free-Model-Router/internal/scoring"
 )
 
 var (
@@ -32,25 +33,33 @@ type PoolMutation struct {
 // ControlRoute is a defensive route view for the management API and desktop.
 // It contains no credentials, request content, or secret values.
 type ControlRoute struct {
-	ID              model.RouteID         `json:"id"`
-	ModelID         model.ProviderModelID `json:"modelId"`
-	Provider        string                `json:"provider"`
-	UpstreamModelID string                `json:"upstreamModelId"`
-	CredentialID    string                `json:"credentialId,omitempty"`
-	Access          model.AccessClass     `json:"access"`
-	Enabled         bool                  `json:"enabled"`
-	Capabilities    model.Capabilities    `json:"capabilities"`
-	Health          health.RouteSnapshot  `json:"health"`
-	TTFTMs          float64               `json:"ttftMs,omitempty"`
-	TTFTKnown       bool                  `json:"ttftKnown"`
+	ID                   model.RouteID         `json:"id"`
+	ModelID              model.ProviderModelID `json:"modelId"`
+	Provider             string                `json:"provider"`
+	UpstreamModelID      string                `json:"upstreamModelId"`
+	CredentialID         string                `json:"credentialId,omitempty"`
+	Access               model.AccessClass     `json:"access"`
+	Enabled              bool                  `json:"enabled"`
+	Capabilities         model.Capabilities    `json:"capabilities"`
+	Health               health.RouteSnapshot  `json:"health"`
+	TTFTMs               float64               `json:"ttftMs,omitempty"`
+	TTFTKnown            bool                  `json:"ttftKnown"`
+	Performance          float64               `json:"performance,omitempty"`
+	EffectivePerformance float64               `json:"effectivePerformance,omitempty"`
+	Confidence           float64               `json:"confidence,omitempty"`
+	LatencyScore         float64               `json:"latencyScore,omitempty"`
+	RoutingScore         float64               `json:"routingScore,omitempty"`
+	RoutingScoreKnown    bool                  `json:"routingScoreKnown"`
 }
 
 // ControlModel is a defensive model view with all route variants.
 type ControlModel struct {
-	Model    model.ProviderModel `json:"model"`
-	Selected bool                `json:"selected"`
-	Pinned   bool                `json:"pinned"`
-	Routes   []ControlRoute      `json:"routes"`
+	Model             model.ProviderModel `json:"model"`
+	Selected          bool                `json:"selected"`
+	Pinned            bool                `json:"pinned"`
+	RoutingScore      float64             `json:"routingScore,omitempty"`
+	RoutingScoreKnown bool                `json:"routingScoreKnown"`
+	Routes            []ControlRoute      `json:"routes"`
 }
 
 // ControlProvider summarizes provider participation in the current catalog.
@@ -101,6 +110,17 @@ func (g *Gateway) ControlSnapshot() ControlSnapshot {
 	}
 	sort.Slice(ids, func(i, j int) bool { return string(ids[i]) < string(ids[j]) })
 	providers := map[string]*ControlProvider{}
+	latencyPopulation := make([]float64, 0)
+	for _, routes := range g.routes {
+		for _, route := range routes {
+			if g.latency == nil {
+				continue
+			}
+			if value, known := g.latency.EffectiveTTFT(string(route.ID)); known {
+				latencyPopulation = append(latencyPopulation, value)
+			}
+		}
+	}
 	for _, id := range ids {
 		pm := g.catalog.Models[id]
 		view := ControlModel{Model: pm, Selected: selected[id], Pinned: id == g.pinnedModel}
@@ -114,18 +134,33 @@ func (g *Gateway) ControlSnapshot() ControlSnapshot {
 			if g.health != nil {
 				routeHealth = g.health.Snapshot(string(route.ID))
 			}
+			latencyScore := scoring.UnknownScore
+			if known {
+				latencyScore = scoring.Percentile(ttft, latencyPopulation, false)
+			}
+			routeScore := scoring.ScoreBinding(g.benchmarkSnapshot, g.benchmarkBindings[id], latencyScore)
+			if !view.RoutingScoreKnown || routeScore.RoutingScore > view.RoutingScore {
+				view.RoutingScore = routeScore.RoutingScore
+				view.RoutingScoreKnown = routeScore.HasPerformanceData || known
+			}
 			view.Routes = append(view.Routes, ControlRoute{
-				ID:              route.ID,
-				ModelID:         route.ModelID,
-				Provider:        route.Provider,
-				UpstreamModelID: route.UpstreamModelID,
-				CredentialID:    route.CredentialID,
-				Access:          route.EffectiveAccess(),
-				Enabled:         route.Enabled,
-				Capabilities:    caps,
-				Health:          routeHealth,
-				TTFTMs:          ttft,
-				TTFTKnown:       known,
+				ID:                   route.ID,
+				ModelID:              route.ModelID,
+				Provider:             route.Provider,
+				UpstreamModelID:      route.UpstreamModelID,
+				CredentialID:         route.CredentialID,
+				Access:               route.EffectiveAccess(),
+				Enabled:              route.Enabled,
+				Capabilities:         caps,
+				Health:               routeHealth,
+				TTFTMs:               ttft,
+				TTFTKnown:            known,
+				Performance:          routeScore.Performance,
+				EffectivePerformance: routeScore.EffectivePerformance,
+				Confidence:           routeScore.Confidence,
+				LatencyScore:         routeScore.Latency,
+				RoutingScore:         routeScore.RoutingScore,
+				RoutingScoreKnown:    routeScore.HasPerformanceData || known,
 			})
 			providerView := providers[route.Provider]
 			if providerView == nil {

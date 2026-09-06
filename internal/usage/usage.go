@@ -119,6 +119,7 @@ type Store struct {
 	path    string
 	records []RequestRecord
 	closed  bool
+	events  *Broadcaster
 }
 
 // New opens or creates a durable usage store at path. An absent file is treated
@@ -128,7 +129,7 @@ func New(path string) (*Store, error) {
 	if path == "" {
 		return NewMemory(), nil
 	}
-	s := &Store{path: path}
+	s := &Store{path: path, events: NewBroadcaster(64)}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -152,7 +153,34 @@ func New(path string) (*Store, error) {
 func Open(path string) (*Store, error) { return New(path) }
 
 // NewMemory creates a non-durable usage store.
-func NewMemory() *Store { return &Store{} }
+func NewMemory() *Store { return &Store{events: NewBroadcaster(64)} }
+
+// Publish forwards a redacted lifecycle event to live desktop subscribers.
+func (s *Store) Publish(event Event) {
+	if s == nil {
+		return
+	}
+	s.mu.RLock()
+	events := s.events
+	s.mu.RUnlock()
+	if events != nil {
+		events.Publish(event)
+	}
+}
+
+// Subscribe returns a live usage stream and an idempotent unsubscribe function.
+func (s *Store) Subscribe() (<-chan Event, func()) {
+	if s == nil {
+		return NewBroadcaster(1).Subscribe()
+	}
+	s.mu.Lock()
+	if s.events == nil {
+		s.events = NewBroadcaster(64)
+	}
+	events := s.events
+	s.mu.Unlock()
+	return events.Subscribe()
+}
 
 // Append stores one immutable request record and applies age and size
 // retention. The input is cloned and normalized before storage.
@@ -180,6 +208,9 @@ func (s *Store) Append(record RequestRecord) error {
 	if err := s.persistLocked(); err != nil {
 		s.records = previous
 		return err
+	}
+	if s.events != nil {
+		s.events.Publish(Event{Type: EventCompleted, RequestID: record.ID, Record: &record})
 	}
 	return nil
 }

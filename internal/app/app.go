@@ -100,6 +100,7 @@ func RunWithProvider(ctx context.Context, cfg *config.Config, log *logging.Logge
 		}
 	}
 	gw.SetUsageSink(usageStore)
+	gw.SetUsageEventPublisher(usageStore)
 	defer usageStore.Close()
 
 	managementBind := strings.TrimSpace(cfg.ManagementBind)
@@ -121,7 +122,7 @@ func RunWithProvider(ctx context.Context, cfg *config.Config, log *logging.Logge
 		}
 		controlOptions := control.Options{
 			Token: managementToken, BuildVersion: BuildVersion,
-			InstanceID: control.NewInstanceID(), Logs: usageStore,
+			InstanceID: control.NewInstanceID(), Logs: usageStore, Events: usageStore,
 			Config: func() control.ConfigResponse {
 				configMu.RLock()
 				defer configMu.RUnlock()

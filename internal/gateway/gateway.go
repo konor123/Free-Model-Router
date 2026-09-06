@@ -52,6 +52,7 @@ type Gateway struct {
 	benchmarkSnapshot scoring.Snapshot
 	benchmarkBindings map[model.ProviderModelID]matcher.BenchmarkBinding
 	usageSink         usage.Sink
+	usageEvents       usage.EventPublisher
 	pinnedModel       model.ProviderModelID
 }
 
@@ -74,6 +75,28 @@ func (g *Gateway) UsageSink() usage.Sink {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return g.usageSink
+}
+
+// SetUsageEventPublisher installs the optional redacted live usage publisher.
+func (g *Gateway) SetUsageEventPublisher(publisher usage.EventPublisher) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.usageEvents = publisher
+}
+
+func (g *Gateway) publishUsageEvent(event usage.Event) {
+	if g == nil {
+		return
+	}
+	g.mu.RLock()
+	publisher := g.usageEvents
+	g.mu.RUnlock()
+	if publisher != nil {
+		publisher.Publish(event)
+	}
 }
 
 func (g *Gateway) recordUsage(record usage.RequestRecord) {

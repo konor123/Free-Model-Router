@@ -19,6 +19,9 @@ Phase 13 localhost control API and `fmr` CLI implemented.
 Phase 14 loopback management and explicit LAN inference authentication implemented.
 Phase 15 desktop lifecycle core implemented, including single-instance leases,
 compatible attach/start ownership, provider menu state, and file-based autostart.
+Phase 16 model-manager filtering, route performance metadata, routing scores, and
+typed control-client mutations implemented.
+Phase 17 live redacted usage events, SSE delivery, and usage-window filters implemented.
 
 ## Layout
 
@@ -123,3 +126,16 @@ compatible attach decisions, explicit `desktop-managed` versus `external`
 ownership, and user-scoped file autostart without adding runtime Node, npm, or
 Rust requirements. Native Tauri packaging is covered by the later desktop
 scaffold and Windows packaging phase.
+
+The model-manager API exposes model and route performance fields including TTFT,
+latency score, benchmark performance, confidence, and routing score. The typed
+control client and `FilterModels` helper support search, provider, access, status,
+and capability filters without changing gateway state. Model-pool writes remain
+optimistic and return revision conflicts instead of silently overwriting another
+client's selection.
+
+Usage windows can poll `GET /_fmr/logs` with time, provider, model, result, and
+fallback filters, or subscribe to `GET /_fmr/logs/events` using the authenticated
+localhost SSE stream. Events contain request IDs, route metadata, and terminal
+results only. Prompts, responses, authorization headers, and secrets have no
+representation in the stream.

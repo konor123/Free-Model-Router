@@ -79,6 +79,40 @@ func TestControlAPIStatusAndBearerAuth(t *testing.T) {
 	}
 }
 
+func TestControlStatusAdvertisesOnlyAvailableFeatures(t *testing.T) {
+	withoutEvents, err := control.NewServer(&fakeBackend{}, control.Options{Token: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusRequest := httptest.NewRequest(http.MethodGet, "/_fmr/status", nil)
+	statusRequest.RemoteAddr = "127.0.0.1:1000"
+	statusRequest.Header.Set("Authorization", "Bearer secret")
+	statusResponse := httptest.NewRecorder()
+	withoutEvents.ServeHTTP(statusResponse, statusRequest)
+	var status control.StatusResponse
+	if err := json.Unmarshal(statusResponse.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	for _, feature := range status.Features {
+		if feature == "usage-events" {
+			t.Fatal("status advertised usage-events without an event subscriber")
+		}
+	}
+
+	withEvents, err := control.NewServer(&fakeBackend{}, control.Options{
+		Token:  "secret",
+		Events: usage.NewMemory(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusResponse = httptest.NewRecorder()
+	withEvents.ServeHTTP(statusResponse, statusRequest)
+	if !strings.Contains(statusResponse.Body.String(), `"usage-events"`) {
+		t.Fatalf("status did not advertise usage-events: %s", statusResponse.Body.String())
+	}
+}
+
 func TestControlAPIRejectsNonLoopbackAndKeepsModelIDsInBodies(t *testing.T) {
 	id, _ := model.NewProviderModelID("opencode", "mimo-v2.5")
 	backend := &fakeBackend{snapshot: gateway.ControlSnapshot{Pool: catalog.ModelPoolConfig{Revision: 12, Mode: catalog.ModeManual}}}

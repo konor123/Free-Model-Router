@@ -31,6 +31,9 @@ func TestUsageRecordsOneRequestAcrossFallbackAttempts(t *testing.T) {
 	}
 	store := usage.NewMemory()
 	g.SetUsageSink(store)
+	g.SetUsageEventPublisher(store)
+	events, unsubscribe := store.Subscribe()
+	defer unsubscribe()
 	w := doFallbackRequest(t, g, `{"model":"fmr/auto","messages":[{"role":"user","content":"private prompt text"}]}`)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "ok") {
 		t.Fatalf("fallback response = %d %s", w.Code, w.Body.String())
@@ -51,6 +54,25 @@ func TestUsageRecordsOneRequestAcrossFallbackAttempts(t *testing.T) {
 	}
 	if strings.Contains(string(mustJSON(record)), "private prompt text") {
 		t.Fatal("usage record retained request content")
+	}
+
+	var lifecycle []usage.Event
+	for len(lifecycle) < 4 {
+		select {
+		case event := <-events:
+			lifecycle = append(lifecycle, event)
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for lifecycle events: %+v", lifecycle)
+		}
+	}
+	if lifecycle[0].Type != usage.EventRequestStarted || lifecycle[1].Type != usage.EventAttemptStarted || lifecycle[2].Type != usage.EventAttemptStarted || lifecycle[3].Type != usage.EventCompleted {
+		t.Fatalf("lifecycle event types = %+v", lifecycle)
+	}
+	if lifecycle[0].RequestID == "" || lifecycle[1].RequestID != lifecycle[0].RequestID || lifecycle[2].RequestID != lifecycle[0].RequestID || lifecycle[3].RequestID != lifecycle[0].RequestID {
+		t.Fatalf("lifecycle request IDs = %+v", lifecycle)
+	}
+	if lifecycle[3].Record == nil || lifecycle[3].Record.ID != lifecycle[0].RequestID {
+		t.Fatalf("completion event = %+v", lifecycle[3])
 	}
 }
 

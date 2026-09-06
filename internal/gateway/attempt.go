@@ -232,6 +232,7 @@ func (g *Gateway) ChatHandler(w http.ResponseWriter, r *http.Request) {
 	requestCtx, collector := withUsageCollector(r.Context())
 	requestID := usage.NewRequestID()
 	w.Header().Set("X-FMR-Request-ID", requestID)
+	g.publishUsageEvent(usage.Event{Type: usage.EventRequestStarted, At: requestStarted, RequestID: requestID})
 	defer func() {
 		attempts, finalModel, finalRoute, providerName, tokens, result := collector.snapshot()
 		if result == "" {
@@ -295,6 +296,10 @@ func (g *Gateway) ChatHandler(w http.ResponseWriter, r *http.Request) {
 		current := candidate.Candidate
 		previous = &current
 		budget := newAttemptBudget(requestCtx, deadline)
+		g.publishUsageEvent(usage.Event{
+			Type: usage.EventAttemptStarted, At: time.Now().UTC(), RequestID: requestID,
+			Attempt: &usage.AttemptRecord{Index: attempt + 1, ProviderModel: current.Model.ID, Route: current.Route.ID},
+		})
 
 		var handled bool
 		if req.Stream {

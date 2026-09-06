@@ -3,6 +3,7 @@ package control
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -44,11 +45,7 @@ func NewServer(backend Backend, opts Options) (*Server, error) {
 	if opts.InstanceID == "" {
 		opts.InstanceID = NewInstanceID()
 	}
-	if len(opts.Features) == 0 {
-		opts.Features = []string{"control-api", "model-pool", "usage-logs"}
-	} else {
-		opts.Features = append([]string(nil), opts.Features...)
-	}
+	opts.Features = availableFeatures(opts.Features, opts.Events)
 	s := &Server{backend: backend, opts: opts, mux: http.NewServeMux()}
 	s.mux.HandleFunc("GET /_fmr/status", s.handleStatus)
 	s.mux.HandleFunc("GET /_fmr/providers", s.handleProviders)
@@ -59,6 +56,7 @@ func NewServer(backend Backend, opts Options) (*Server, error) {
 	s.mux.HandleFunc("POST /_fmr/pin", s.handlePin)
 	s.mux.HandleFunc("POST /_fmr/auto", s.handleAuto)
 	s.mux.HandleFunc("GET /_fmr/logs", s.handleLogs)
+	s.mux.HandleFunc("GET /_fmr/logs/events", s.handleLogEvents)
 	s.mux.HandleFunc("GET /_fmr/config", s.handleConfig)
 	s.mux.HandleFunc("POST /_fmr/stop", s.handleStop)
 	s.auth = security.RequireBearer(s.mux, opts.Token)
@@ -109,14 +107,16 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 	data := make([]ModelResponse, 0, len(snapshot.Models))
 	for _, modelView := range snapshot.Models {
 		modelResponse := ModelResponse{
-			ID:           string(modelView.Model.ID),
-			CanonicalKey: string(modelView.Model.CanonicalKey),
-			DisplayName:  modelView.Model.DisplayName,
-			UpstreamID:   modelView.Model.UpstreamID,
-			Capabilities: modelView.Model.Base,
-			Selected:     modelView.Selected,
-			Pinned:       modelView.Pinned,
-			Routes:       make([]RouteResponse, 0, len(modelView.Routes)),
+			ID:                string(modelView.Model.ID),
+			CanonicalKey:      string(modelView.Model.CanonicalKey),
+			DisplayName:       modelView.Model.DisplayName,
+			UpstreamID:        modelView.Model.UpstreamID,
+			Capabilities:      modelView.Model.Base,
+			Selected:          modelView.Selected,
+			Pinned:            modelView.Pinned,
+			RoutingScore:      modelView.RoutingScore,
+			RoutingScoreKnown: modelView.RoutingScoreKnown,
+			Routes:            make([]RouteResponse, 0, len(modelView.Routes)),
 		}
 		for _, route := range modelView.Routes {
 			coolingUntil := ""
@@ -138,6 +138,9 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 					ConsecutiveFailures: route.Health.ConsecutiveFailures, Available: available,
 				},
 				TTFTMs: route.TTFTMs, TTFTKnown: route.TTFTKnown,
+				Performance: route.Performance, EffectivePerformance: route.EffectivePerformance,
+				Confidence: route.Confidence, LatencyScore: route.LatencyScore,
+				RoutingScore: route.RoutingScore, RoutingScoreKnown: route.RoutingScoreKnown,
 			})
 		}
 		data = append(data, modelResponse)
@@ -301,6 +304,42 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": records})
+}
+
+func (s *Server) handleLogEvents(w http.ResponseWriter, r *http.Request) {
+	if s.opts.Events == nil {
+		writeError(w, http.StatusNotFound, "usage event stream is unavailable")
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "usage event stream unsupported")
+		return
+	}
+	events, unsubscribe := s.opts.Events.Subscribe()
+	defer unsubscribe()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher.Flush()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event, ok := <-events:
+			if !ok {
+				return
+			}
+			payload, err := json.Marshal(event)
+			if err != nil {
+				return
+			}
+			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, payload); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {

@@ -43,6 +43,12 @@ type LogReader interface {
 	List(usage.Query) ([]usage.RequestRecord, error)
 }
 
+// EventSubscriber is the redacted live usage stream consumed by a desktop
+// usage window. Implementations must never publish request content or secrets.
+type EventSubscriber interface {
+	Subscribe() (<-chan usage.Event, func())
+}
+
 // Options configures the control server.
 type Options struct {
 	Token        string
@@ -51,6 +57,7 @@ type Options struct {
 	InstanceID   string
 	Features     []string
 	Logs         LogReader
+	Events       EventSubscriber
 	Config       func() ConfigResponse
 	OnChange     func(gateway.ControlSnapshot) error
 	Stop         func()
@@ -77,17 +84,23 @@ type ProviderResponse struct {
 
 // RouteResponse is a safe route detail with no credentials.
 type RouteResponse struct {
-	ID              string              `json:"id"`
-	ModelID         string              `json:"modelId"`
-	Provider        string              `json:"provider"`
-	UpstreamModelID string              `json:"upstreamModelId"`
-	CredentialID    string              `json:"credentialId,omitempty"`
-	Access          model.AccessClass   `json:"access"`
-	Enabled         bool                `json:"enabled"`
-	Capabilities    model.Capabilities  `json:"capabilities"`
-	Health          RouteHealthResponse `json:"health"`
-	TTFTMs          float64             `json:"ttftMs,omitempty"`
-	TTFTKnown       bool                `json:"ttftKnown"`
+	ID                   string              `json:"id"`
+	ModelID              string              `json:"modelId"`
+	Provider             string              `json:"provider"`
+	UpstreamModelID      string              `json:"upstreamModelId"`
+	CredentialID         string              `json:"credentialId,omitempty"`
+	Access               model.AccessClass   `json:"access"`
+	Enabled              bool                `json:"enabled"`
+	Capabilities         model.Capabilities  `json:"capabilities"`
+	Health               RouteHealthResponse `json:"health"`
+	TTFTMs               float64             `json:"ttftMs,omitempty"`
+	TTFTKnown            bool                `json:"ttftKnown"`
+	Performance          float64             `json:"performance,omitempty"`
+	EffectivePerformance float64             `json:"effectivePerformance,omitempty"`
+	Confidence           float64             `json:"confidence,omitempty"`
+	LatencyScore         float64             `json:"latencyScore,omitempty"`
+	RoutingScore         float64             `json:"routingScore,omitempty"`
+	RoutingScoreKnown    bool                `json:"routingScoreKnown"`
 }
 
 // RouteHealthResponse is the JSON-safe health status for one route.
@@ -100,14 +113,16 @@ type RouteHealthResponse struct {
 
 // ModelResponse is a model manager row and its route details.
 type ModelResponse struct {
-	ID           string             `json:"id"`
-	CanonicalKey string             `json:"canonicalKey,omitempty"`
-	DisplayName  string             `json:"displayName"`
-	UpstreamID   string             `json:"upstreamId"`
-	Capabilities model.Capabilities `json:"capabilities"`
-	Selected     bool               `json:"selected"`
-	Pinned       bool               `json:"pinned"`
-	Routes       []RouteResponse    `json:"routes"`
+	ID                string             `json:"id"`
+	CanonicalKey      string             `json:"canonicalKey,omitempty"`
+	DisplayName       string             `json:"displayName"`
+	UpstreamID        string             `json:"upstreamId"`
+	Capabilities      model.Capabilities `json:"capabilities"`
+	Selected          bool               `json:"selected"`
+	Pinned            bool               `json:"pinned"`
+	RoutingScore      float64            `json:"routingScore,omitempty"`
+	RoutingScoreKnown bool               `json:"routingScoreKnown"`
+	Routes            []RouteResponse    `json:"routes"`
 }
 
 // PoolResponse is the optimistic model-pool state returned by control writes.
@@ -138,10 +153,7 @@ func (o Options) Status(snapshot gateway.ControlSnapshot) StatusResponse {
 	if buildVersion == "" {
 		buildVersion = DefaultBuildVersion
 	}
-	features := append([]string(nil), o.Features...)
-	if len(features) == 0 {
-		features = []string{"control-api", "model-pool", "usage-logs"}
-	}
+	features := availableFeatures(o.Features, o.Events)
 	return StatusResponse{
 		APIVersion:      apiVersion,
 		BuildVersion:    buildVersion,
@@ -151,6 +163,24 @@ func (o Options) Status(snapshot gateway.ControlSnapshot) StatusResponse {
 		PoolRevision:    snapshot.Pool.Revision,
 		PinnedModel:     string(snapshot.PinnedModel),
 	}
+}
+
+func availableFeatures(configured []string, events EventSubscriber) []string {
+	if len(configured) == 0 {
+		configured = []string{"control-api", "model-pool", "usage-logs"}
+		if events != nil {
+			configured = append(configured, "usage-events")
+		}
+		return configured
+	}
+	features := make([]string, 0, len(configured))
+	for _, feature := range configured {
+		if feature == "usage-events" && events == nil {
+			continue
+		}
+		features = append(features, feature)
+	}
+	return features
 }
 
 // NewInstanceID creates a non-secret process identity for status and desktop
