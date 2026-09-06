@@ -28,6 +28,40 @@ func TestCapabilityIntersection(t *testing.T) {
 	}
 }
 
+func TestCapabilityStateDistinguishesUnknownAndUnsupported(t *testing.T) {
+	unknown := Capabilities{}
+	unknown.MarkUnknown(CapTools)
+	if got := unknown.State(CapTools); got != CapabilityUnknown {
+		t.Fatalf("missing metadata state = %v, want Unknown", got)
+	}
+	if unknown.Supports(RequestRequirements{Tools: true}) {
+		t.Fatal("unknown tools capability must fail closed for routing")
+	}
+
+	unsupported := Capabilities{}
+	if got := unsupported.State(CapTools); got != CapabilityUnsupported {
+		t.Fatalf("explicit false state = %v, want Unsupported", got)
+	}
+
+	supported := Capabilities{Tools: true}
+	if got := supported.State(CapTools); got != CapabilitySupported {
+		t.Fatalf("explicit true state = %v, want Supported", got)
+	}
+}
+
+func TestCapabilityIntersectionPreservesUnknownUnlessVetoed(t *testing.T) {
+	base := Capabilities{}
+	base.MarkUnknown(CapTools)
+	protocol := Capabilities{Tools: true}
+	if got := base.Intersect(protocol).State(CapTools); got != CapabilityUnknown {
+		t.Fatalf("unknown model plus supported route = %v, want Unknown", got)
+	}
+	unsupportedRoute := Capabilities{}
+	if got := base.Intersect(unsupportedRoute).State(CapTools); got != CapabilityUnsupported {
+		t.Fatalf("unsupported route must veto unknown model, got %v", got)
+	}
+}
+
 func TestSupportsRequirement(t *testing.T) {
 	caps := Capabilities{Streaming: true, Tools: true, ContextLength: 8192, MaxOutput: 4096}
 

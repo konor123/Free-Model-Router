@@ -16,9 +16,9 @@ const (
 
 // EWMA is an exponentially weighted moving average in milliseconds.
 type EWMA struct {
-	mu   sync.Mutex
-	val  float64
-	n    int // number of samples folded in
+	mu  sync.Mutex
+	val float64
+	n   int // number of samples folded in
 }
 
 // New builds an empty EWMA.
@@ -55,8 +55,8 @@ func (e *EWMA) Samples() int {
 
 // Stats bundles the three maintained averages for one route.
 type Stats struct {
-	ProbeTTFT   *EWMA // from probe requests
-	RequestTTFT *EWMA // from real client requests
+	ProbeTTFT    *EWMA // from probe requests
+	RequestTTFT  *EWMA // from real client requests
 	RequestTotal *EWMA // total latency of real requests
 }
 
@@ -93,14 +93,20 @@ func (r *Registry) For(routeID string) *Stats {
 
 // RecordProbe records a probe TTFT sample for the route.
 func (r *Registry) RecordProbe(routeID string, ttftMs float64) {
-	r.For(routeID).ProbeTTFT.Add(ttftMs)
+	if ttftMs > UnknownMs {
+		r.For(routeID).ProbeTTFT.Add(ttftMs)
+	}
 }
 
 // RecordRequest records a real request's TTFT and total latency.
 func (r *Registry) RecordRequest(routeID string, ttftMs, totalMs float64) {
 	s := r.For(routeID)
-	s.RequestTTFT.Add(ttftMs)
-	s.RequestTotal.Add(totalMs)
+	if ttftMs > UnknownMs {
+		s.RequestTTFT.Add(ttftMs)
+	}
+	if totalMs > UnknownMs {
+		s.RequestTotal.Add(totalMs)
+	}
 }
 
 // EffectiveTTFT returns the best available routing estimate: probes are
@@ -139,6 +145,9 @@ func (t *Timer) OnSemanticEvent() (time.Duration, bool) {
 	t.recorded = true
 	return time.Since(t.start), true
 }
+
+// Elapsed returns the duration since the timer started.
+func (t *Timer) Elapsed() time.Duration { return time.Since(t.start) }
 
 // Recorded reports whether TTFT was captured.
 func (t *Timer) Recorded() bool { return t.recorded }

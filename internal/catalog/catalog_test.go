@@ -154,6 +154,39 @@ func TestClearAllEmptyPool(t *testing.T) {
 	}
 }
 
+func TestStoreAssignsMonotonicSnapshotRevisionsAndCopiesModels(t *testing.T) {
+	store := NewStore(nil)
+	id := pm("first")
+	first, err := store.CommitSnapshot(&model.CatalogSnapshot{
+		Revision: 9000,
+		Models:   map[model.ProviderModelID]model.ProviderModel{id.ID: id},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Revision != 1 || first.CreatedAt.IsZero() {
+		t.Fatalf("first committed snapshot = %+v", first)
+	}
+
+	// Mutating the provider-owned input after commit must not mutate the store.
+	delete(first.Models, id.ID)
+	stored := store.CatalogSnapshot()
+	if stored == nil || len(stored.Models) != 1 {
+		t.Fatalf("store must retain a defensive copy: %+v", stored)
+	}
+
+	second, err := store.CommitSnapshot(&model.CatalogSnapshot{
+		Revision: 1, // provider revisions are ignored by the store
+		Models:   map[model.ProviderModelID]model.ProviderModel{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Revision != 2 {
+		t.Fatalf("second committed revision = %d, want 2", second.Revision)
+	}
+}
+
 func TestSelectAllImmediatelyAddsEligibleRoutes(t *testing.T) {
 	free, paid := pm("free"), pm("paid")
 	p := NewPoolState(&ModelPoolConfig{Mode: ModeManual})

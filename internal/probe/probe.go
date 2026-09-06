@@ -15,13 +15,13 @@ import (
 
 // Target is one probeable route.
 type Target struct {
-	Route   model.ProviderRoute
-	Model   model.ProviderModel
+	Route model.ProviderRoute
+	Model model.ProviderModel
 }
 
 // Scheduler probes eligible routes periodically.
 type Scheduler struct {
-	Reg   *latency.Registry
+	Reg    *latency.Registry
 	Health *health.Manager
 
 	interval time.Duration
@@ -39,9 +39,9 @@ const DefaultProbeTimeout = 10 * time.Second
 
 // Snapshot is an immutable, coherent probe view loaded once per cycle.
 type Snapshot struct {
-	Catalog *model.CatalogSnapshot
-	Pool    []model.ProviderModelID
-	Routes  map[model.ProviderModelID][]model.ProviderRoute
+	Catalog  *model.CatalogSnapshot
+	Pool     []model.ProviderModelID
+	Routes   map[model.ProviderModelID][]model.ProviderRoute
 	Provider provider.Provider
 }
 
@@ -78,7 +78,7 @@ func EligibleTargets(catalog *model.CatalogSnapshot, pool []model.ProviderModelI
 			if !route.EffectiveAccess().AutoRoutable() {
 				continue // Paid/Unknown never probed
 			}
-			if !h.Available(string(route.ID)) {
+			if h != nil && !h.Available(string(route.ID)) {
 				continue // cooling down or quota exhausted
 			}
 			out = append(out, Target{Route: route, Model: pm})
@@ -104,6 +104,7 @@ func (s *Scheduler) Start(ctx context.Context, source SnapshotSource) {
 
 	go func() {
 		defer close(done)
+		s.runOnce(ctx, source)
 		for {
 			delay := s.jitteredInterval()
 			timer := time.NewTimer(delay)
@@ -120,17 +121,31 @@ func (s *Scheduler) Start(ctx context.Context, source SnapshotSource) {
 				s.mu.Unlock()
 				return
 			case <-timer.C:
-				snap := source()
-				if snap == nil || snap.Provider == nil {
-					continue
-				}
-				targets := EligibleTargets(snap.Catalog, snap.Pool, snap.Routes, s.Health)
-				for _, t := range targets {
-					s.probeOnce(ctx, t, snap.Provider)
-				}
+				s.runOnce(ctx, source)
 			}
 		}
 	}()
+}
+
+// RunOnce executes a single probe cycle using a freshly loaded coherent view.
+// The source is evaluated exactly once, so pool/catalog changes become visible
+// on the next cycle without retaining stale targets.
+func (s *Scheduler) RunOnce(ctx context.Context, source SnapshotSource) {
+	s.runOnce(ctx, source)
+}
+
+func (s *Scheduler) runOnce(ctx context.Context, source SnapshotSource) {
+	if source == nil {
+		return
+	}
+	snap := source()
+	if snap == nil || snap.Provider == nil {
+		return
+	}
+	targets := EligibleTargets(snap.Catalog, snap.Pool, snap.Routes, s.Health)
+	for _, target := range targets {
+		s.probeOnce(ctx, target, snap.Provider)
+	}
 }
 
 func (s *Scheduler) jitteredInterval() time.Duration {

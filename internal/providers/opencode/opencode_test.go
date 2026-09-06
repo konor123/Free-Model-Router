@@ -43,6 +43,9 @@ func TestDiscoverModelsCatalog(t *testing.T) {
 	if len(snap.Models) != 2 {
 		t.Fatalf("expected 2 models, got %d", len(snap.Models))
 	}
+	if snap.CreatedAt.IsZero() {
+		t.Fatal("discovered catalog must record its creation time")
+	}
 	id, err := model.NewProviderModelID("opencode", "mimo-v2.5")
 	if err != nil {
 		t.Fatal(err)
@@ -53,6 +56,9 @@ func TestDiscoverModelsCatalog(t *testing.T) {
 	}
 	if pm.Base.Tools != true || pm.Base.Streaming != true {
 		t.Fatalf("capabilities not normalized: %+v", pm.Base)
+	}
+	if !pm.Base.IsUnknown(model.CapVision) || !pm.Base.IsUnknown(model.CapStructuredOutput) || !pm.Base.IsUnknown(model.CapReasoning) {
+		t.Fatalf("omitted feature metadata must remain unknown: %+v", pm.Base)
 	}
 	if pm.UpstreamID != "mimo-v2.5" {
 		t.Fatalf("upstream ID mismatch: %q", pm.UpstreamID)
@@ -81,19 +87,19 @@ func TestDiscoverModelsServerError(t *testing.T) {
 
 func TestChatCompletionNonStreaming(t *testing.T) {
 	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
-json.NewEncoder(w).Encode(chatResponse{
-		Choices: []struct {
+		json.NewEncoder(w).Encode(chatResponse{
+			Choices: []struct {
 				Message struct {
 					Content          string              `json:"content"`
 					ToolCalls        []provider.ToolCall `json:"tool_calls"`
 					ReasoningContent string              `json:"reasoning_content"`
-			} `json:"message"`
-			Delta        string `json:"delta"`
-			FinishReason string `json:"finish_reason"`
-		}{
-			{Delta: "hello world", FinishReason: "stop"},
-		},
-	})
+				} `json:"message"`
+				Delta        string `json:"delta"`
+				FinishReason string `json:"finish_reason"`
+			}{
+				{Delta: "hello world", FinishReason: "stop"},
+			},
+		})
 	})
 	route := PublicRoute(mustID(t, "opencode", "mimo-v2.5"), "mimo-v2.5", model.Capabilities{})
 	stream, err := p.ChatCompletion(context.Background(), route, provider.NormalizedRequest{
@@ -239,7 +245,7 @@ func TestBuildPayloadPreservesAgentFields(t *testing.T) {
 				Type: "image_url", ImageURL: &provider.ImageURL{URL: "https://example.test/image.png"},
 			}},
 		}},
-		Tools: []provider.ToolSpec{{Name: "lookup", Schema: `{"type":"object"}`}},
+		Tools:          []provider.ToolSpec{{Name: "lookup", Schema: `{"type":"object"}`}},
 		ToolChoice:     json.RawMessage(`{"type":"function","function":{"name":"lookup"}}`),
 		ResponseFormat: json.RawMessage(`{"type":"json_schema","json_schema":{"name":"answer","schema":{"type":"object"}}}`),
 		Reasoning:      json.RawMessage(`{"effort":"high"}`),

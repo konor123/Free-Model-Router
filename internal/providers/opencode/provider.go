@@ -2,11 +2,11 @@ package opencode
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"encoding/base64"
 	"strings"
 	"time"
 
@@ -45,8 +45,8 @@ type catalogEntry struct {
 	Object  string `json:"object,omitempty"`
 	OwnedBy string `json:"owned_by,omitempty"`
 
-	ContextLength int  `json:"context_length,omitempty"`
-	MaxOutput     int  `json:"max_output_tokens,omitempty"`
+	ContextLength int   `json:"context_length,omitempty"`
+	MaxOutput     int   `json:"max_output_tokens,omitempty"`
 	Streaming     *bool `json:"streaming,omitempty"`
 	Tools         *bool `json:"tools,omitempty"`
 	Vision        *bool `json:"vision,omitempty"`
@@ -85,9 +85,10 @@ func (p *Provider) DiscoverModels(ctx context.Context) (*model.CatalogSnapshot, 
 			fmt.Errorf("malformed catalog response: %w", err))
 	}
 
+	now := time.Now().UTC()
 	snap := &model.CatalogSnapshot{
-		Revision: model.SnapshotRevision(time.Now().UnixNano()),
-		Models:   map[model.ProviderModelID]model.ProviderModel{},
+		CreatedAt: now,
+		Models:    map[model.ProviderModelID]model.ProviderModel{},
 	}
 	for _, e := range parsed.Data {
 		if e.ID == "" {
@@ -98,20 +99,35 @@ func (p *Provider) DiscoverModels(ctx context.Context) (*model.CatalogSnapshot, 
 			continue // skip non-normalizable entries
 		}
 		key, _ := model.NewCanonicalModelKey(canonicalize(e.ID))
+		base := model.Capabilities{
+			Streaming:        boolOr(e.Streaming, true),
+			Tools:            boolOr(e.Tools, false),
+			Vision:           boolOr(e.Vision, false),
+			StructuredOutput: boolOr(e.Structured, false),
+			Reasoning:        boolOr(e.Reasoning, false),
+			ContextLength:    e.ContextLength,
+			MaxOutput:        e.MaxOutput,
+		}
+		// Streaming is guaranteed by the OpenAI-compatible route default. Other
+		// feature bits remain unknown when the catalog omits their metadata.
+		if e.Tools == nil {
+			base.MarkUnknown(model.CapTools)
+		}
+		if e.Vision == nil {
+			base.MarkUnknown(model.CapVision)
+		}
+		if e.Structured == nil {
+			base.MarkUnknown(model.CapStructuredOutput)
+		}
+		if e.Reasoning == nil {
+			base.MarkUnknown(model.CapReasoning)
+		}
 		pm := model.ProviderModel{
 			ID:           pmid,
 			CanonicalKey: key,
 			DisplayName:  e.ID,
 			UpstreamID:   e.ID,
-			Base: model.Capabilities{
-				Streaming:        boolOr(e.Streaming, true),
-				Tools:            boolOr(e.Tools, false),
-				Vision:           boolOr(e.Vision, false),
-				StructuredOutput: boolOr(e.Structured, false),
-				Reasoning:        boolOr(e.Reasoning, false),
-				ContextLength:    e.ContextLength,
-				MaxOutput:        e.MaxOutput,
-			},
+			Base:         base,
 		}
 		if existing, exists := snap.Models[pmid]; exists && existing.UpstreamID != e.ID {
 			return nil, provider.NewFailureError(model.NewFailure(model.FailureProtocol, model.ScopeProvider),

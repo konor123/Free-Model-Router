@@ -1,7 +1,9 @@
 package catalog
 
 import (
+	"fmt"
 	"sync"
+	"time"
 
 	"github.com/konor123/Free-Model-Router/internal/model"
 )
@@ -10,13 +12,52 @@ import (
 // Reads return deep copies; writes run under the write lock so gateway
 // traffic and UI edits are serialized safely (atomic swap semantics).
 type Store struct {
-	mu   sync.RWMutex
-	pool *PoolState
+	mu               sync.RWMutex
+	pool             *PoolState
+	catalog          *model.CatalogSnapshot
+	snapshotRevision model.SnapshotRevision
 }
 
 // NewStore builds a Store with the given pool state.
 func NewStore(p *PoolState) *Store {
+	if p == nil {
+		p = NewPoolState(nil)
+	}
 	return &Store{pool: p}
+}
+
+// CommitSnapshot stores a defensive copy of a discovered catalog and assigns
+// the next process-local monotonic revision. Provider wall-clock timestamps
+// are intentionally not trusted as concurrency revisions.
+func (s *Store) CommitSnapshot(snap *model.CatalogSnapshot) (*model.CatalogSnapshot, error) {
+	if snap == nil {
+		return nil, fmt.Errorf("nil catalog snapshot")
+	}
+	if err := snap.Validate(); err != nil {
+		return nil, fmt.Errorf("catalog snapshot: %w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snapshotRevision++
+	committed := snap.Clone()
+	committed.Revision = s.snapshotRevision
+	if committed.CreatedAt.IsZero() {
+		committed.CreatedAt = time.Now().UTC()
+	}
+	s.catalog = committed
+	return committed.Clone(), nil
+}
+
+// CommitCatalogSnapshot is a descriptive alias for CommitSnapshot.
+func (s *Store) CommitCatalogSnapshot(snap *model.CatalogSnapshot) (*model.CatalogSnapshot, error) {
+	return s.CommitSnapshot(snap)
+}
+
+// CatalogSnapshot returns the latest committed catalog view.
+func (s *Store) CatalogSnapshot() *model.CatalogSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.catalog.Clone()
 }
 
 // Snapshot returns a deep copy of the current pool config (atomic read).

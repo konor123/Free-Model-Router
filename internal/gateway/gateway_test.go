@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,7 +69,7 @@ func (f fakeProvider) DiscoverModels(ctx context.Context) (*model.CatalogSnapsho
 		if err != nil {
 			continue
 		}
-		snap.Models[pmid] = model.ProviderModel{ID: pmid, UpstreamID: e.ID}
+		snap.Models[pmid] = model.ProviderModel{ID: pmid, UpstreamID: e.ID, Base: model.Capabilities{Streaming: true}}
 	}
 	return snap, nil
 }
@@ -212,7 +214,9 @@ func TestModelsListReflectsLivePool(t *testing.T) {
 	}))
 	defer backend.Close()
 	g, err := NewGateway(context.Background(), fakeProvider{base: backend.URL})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	second, _ := model.NewProviderModelID("opencode", "second")
 	g.pool.Deselect([]model.ProviderModelID{second})
 	w := httptest.NewRecorder()
@@ -229,7 +233,9 @@ func TestRefreshCatalogKeepsAuthRouteUnknownAndPublicIsolated(t *testing.T) {
 	}))
 	defer backend.Close()
 	g, err := NewGateway(context.Background(), fakeProvider{base: backend.URL})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	id, _ := model.NewProviderModelID("opencode", "m")
 	routes := g.routes[id]
 	if len(routes) != 2 || routes[0].EffectiveAccess() != model.AccessFree || routes[1].EffectiveAccess() != model.AccessUnknown {
@@ -247,11 +253,17 @@ func TestResolveCandidateFiltersToolsAndVision(t *testing.T) {
 	}))
 	defer backend.Close()
 	g, err := NewGateway(context.Background(), fakeProvider{base: backend.URL})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	toolsID, _ := model.NewProviderModelID("opencode", "tools")
 	visionID, _ := model.NewProviderModelID("opencode", "vision")
-	tools := g.catalog.Models[toolsID]; tools.Base = model.Capabilities{Tools: true}; g.catalog.Models[toolsID] = tools
-	vision := g.catalog.Models[visionID]; vision.Base = model.Capabilities{Vision: true}; g.catalog.Models[visionID] = vision
+	tools := g.catalog.Models[toolsID]
+	tools.Base = model.Capabilities{Tools: true}
+	g.catalog.Models[toolsID] = tools
+	vision := g.catalog.Models[visionID]
+	vision.Base = model.Capabilities{Vision: true}
+	g.catalog.Models[visionID] = vision
 	if pick, _, ok := g.resolveCandidate(chatCompletionRequest{Tools: []gatewayTool{{}}}); !ok || pick != toolsID {
 		t.Fatalf("tools request selected %q, want %q", pick, toolsID)
 	}
@@ -370,4 +382,184 @@ func (f streamingFakeProvider) ChatCompletion(ctx context.Context, route model.P
 		return nil, err
 	}
 	return &sseFakeStream{rdr: bufio.NewReader(resp.Body)}, nil
+}
+
+type scriptedStep struct {
+	event provider.StreamEvent
+	err   error
+}
+
+type scriptedStream struct {
+	steps []scriptedStep
+	index int
+	delay time.Duration
+}
+
+func (s *scriptedStream) Next(context.Context) (provider.StreamEvent, error) {
+	if s.index >= len(s.steps) {
+		return provider.StreamEvent{}, io.EOF
+	}
+	step := s.steps[s.index]
+	s.index++
+	if s.delay > 0 {
+		time.Sleep(s.delay)
+	}
+	return step.event, step.err
+}
+
+func (s *scriptedStream) Close() error { return nil }
+
+type scriptedProvider struct {
+	streamFactory func() provider.ChatStream
+}
+
+func (p scriptedProvider) DiscoverModels(context.Context) (*model.CatalogSnapshot, error) {
+	id, err := model.NewProviderModelID("opencode", "scripted")
+	if err != nil {
+		return nil, err
+	}
+	return &model.CatalogSnapshot{
+		Models: map[model.ProviderModelID]model.ProviderModel{
+			id: {ID: id, UpstreamID: "scripted", Base: model.Capabilities{Streaming: true}},
+		},
+	}, nil
+}
+
+func (p scriptedProvider) ChatCompletion(context.Context, model.ProviderRoute, provider.NormalizedRequest) (provider.ChatStream, error) {
+	return p.streamFactory(), nil
+}
+
+func newScriptedGateway(t *testing.T, factory func() provider.ChatStream) *Gateway {
+	t.Helper()
+	g, err := NewGateway(context.Background(), scriptedProvider{streamFactory: factory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+func TestStreamingFailureBeforeSemanticDoesNotCommit(t *testing.T) {
+	g := newScriptedGateway(t, func() provider.ChatStream {
+		return &scriptedStream{steps: []scriptedStep{{err: provider.NewFailureError(
+			model.NewFailure(model.FailureTimeout, model.ScopeRoute), errors.New("upstream timeout"))}}}
+	})
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(
+		`{"model":"afm/auto","stream":true,"messages":[{"role":"user","content":"x"}]}`))
+	g.ChatHandler(w, r)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("pre-semantic failure status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Header().Get("Content-Type"), "text/event-stream") {
+		t.Fatal("pre-semantic failure must not commit SSE headers")
+	}
+	state := g.health.Snapshot("opencode-public::scripted")
+	if state.ConsecutiveFailures != 1 {
+		t.Fatalf("expected route failure accounting, got %+v", state)
+	}
+}
+
+func TestStreamingFailureAfterSemanticCommitsAndRecordsMetrics(t *testing.T) {
+	g := newScriptedGateway(t, func() provider.ChatStream {
+		return &scriptedStream{steps: []scriptedStep{
+			{event: provider.StreamEvent{DeltaText: "hello"}},
+			{err: errors.New("connection reset")},
+		}, delay: time.Millisecond}
+	})
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(
+		`{"model":"afm/auto","stream":true,"messages":[{"role":"user","content":"x"}]}`))
+	g.ChatHandler(w, r)
+
+	if w.Code != http.StatusOK || !strings.Contains(w.Header().Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("committed stream status/headers = %d/%q", w.Code, w.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(w.Body.String(), `"content":"hello"`) || !strings.Contains(w.Body.String(), "connection reset") {
+		t.Fatalf("committed stream must preserve data and terminal error: %s", w.Body.String())
+	}
+	state := g.health.Snapshot("opencode-public::scripted")
+	if state.ConsecutiveFailures != 1 {
+		t.Fatalf("expected post-commit route failure accounting, got %+v", state)
+	}
+	stats := g.latency.For("opencode-public::scripted")
+	if stats.RequestTTFT.Samples() != 1 || stats.RequestTotal.Samples() != 1 {
+		t.Fatalf("expected streaming TTFT and total metrics, got ttft=%d total=%d", stats.RequestTTFT.Samples(), stats.RequestTotal.Samples())
+	}
+}
+
+func TestNonStreamingRecordsTTFTAndTotalMetrics(t *testing.T) {
+	g := newScriptedGateway(t, func() provider.ChatStream {
+		return &scriptedStream{steps: []scriptedStep{
+			{event: provider.StreamEvent{DeltaText: "ok", FinishReason: "stop"}},
+		}, delay: time.Millisecond}
+	})
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(
+		`{"model":"afm/auto","messages":[{"role":"user","content":"x"}]}`))
+	g.ChatHandler(w, r)
+
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "ok") {
+		t.Fatalf("non-streaming response = %d %s", w.Code, w.Body.String())
+	}
+	stats := g.latency.For("opencode-public::scripted")
+	if stats.RequestTTFT.Samples() != 1 || stats.RequestTotal.Samples() != 1 {
+		t.Fatalf("expected non-streaming TTFT and total metrics, got ttft=%d total=%d", stats.RequestTTFT.Samples(), stats.RequestTotal.Samples())
+	}
+	if state := g.health.Snapshot("opencode-public::scripted"); state.ConsecutiveFailures != 0 {
+		t.Fatalf("successful request must clear route failures, got %+v", state)
+	}
+}
+
+func TestProbeCycleUsesLivePoolAndHTTPProvider(t *testing.T) {
+	t.Setenv(opencode.AuthRouteEnv, "")
+	var mu sync.Mutex
+	counts := map[string]int{}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"first"},{"id":"second"}]}`))
+		case "/chat/completions":
+			var payload struct {
+				Model  string `json:"model"`
+				Stream bool   `json:"stream"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("decode probe payload: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			counts[payload.Model]++
+			mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\ndata: [DONE]\n\n"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer backend.Close()
+
+	g, err := NewGateway(context.Background(), opencode.New(backend.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.ProbeOnce(context.Background())
+	mu.Lock()
+	firstCount := counts["first"]
+	secondCount := counts["second"]
+	mu.Unlock()
+	if firstCount != 1 || secondCount != 1 {
+		t.Fatalf("initial probe targets = first:%d second:%d", firstCount, secondCount)
+	}
+	secondID, _ := model.NewProviderModelID("opencode", "second")
+	g.pool.Deselect([]model.ProviderModelID{secondID})
+	g.ProbeOnce(context.Background())
+	mu.Lock()
+	firstCount = counts["first"]
+	secondCount = counts["second"]
+	mu.Unlock()
+	if firstCount != 2 || secondCount != 1 {
+		t.Fatalf("probe target did not follow live pool: first:%d second:%d", firstCount, secondCount)
+	}
 }

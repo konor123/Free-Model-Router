@@ -9,10 +9,10 @@ import (
 type AccessClass string
 
 const (
-	AccessUnknown   AccessClass = "Unknown"
-	AccessFree      AccessClass = "Free"
-	AccessFreeTier  AccessClass = "Free-tier"
-	AccessPaid      AccessClass = "Paid"
+	AccessUnknown  AccessClass = "Unknown"
+	AccessFree     AccessClass = "Free"
+	AccessFreeTier AccessClass = "Free-tier"
+	AccessPaid     AccessClass = "Paid"
 )
 
 // AutoRoutable reports whether the access class is eligible for automatic routing.
@@ -37,6 +37,31 @@ const (
 	CapReasoning        Capability = "Reasoning"
 )
 
+// CapabilityState distinguishes a verified unsupported feature from metadata
+// that was not supplied by a provider. Unknown capabilities are represented
+// separately so callers can apply a deliberate policy instead of treating
+// missing metadata as a negative answer.
+type CapabilityState uint8
+
+const (
+	CapabilityUnknown CapabilityState = iota
+	CapabilityUnsupported
+	CapabilitySupported
+)
+
+// CapabilitySet is a bit set used to mark feature capabilities whose state is
+// unknown. The boolean fields below remain the wire-compatible representation
+// of positive/negative capability metadata.
+type CapabilitySet uint16
+
+const (
+	capStreamingBit CapabilitySet = 1 << iota
+	capToolsBit
+	capVisionBit
+	capStructuredOutputBit
+	capReasoningBit
+)
+
 // Capabilities is a set of capabilities plus numeric limits.
 type Capabilities struct {
 	Streaming        bool `json:"streaming"`
@@ -44,6 +69,10 @@ type Capabilities struct {
 	Vision           bool `json:"vision"`
 	StructuredOutput bool `json:"structuredOutput"`
 	Reasoning        bool `json:"reasoning"`
+
+	// Unknown marks feature fields whose provider metadata was omitted. A
+	// marked feature is neither supported nor unsupported until verified.
+	Unknown CapabilitySet `json:"unknown,omitempty"`
 
 	// ContextLength is the maximum input context window in tokens (0 = unknown).
 	ContextLength int `json:"contextLength,omitempty"`
@@ -54,30 +83,129 @@ type Capabilities struct {
 // Intersect returns the intersection of two capability sets
 // (model base ∩ route/protocol override, PLAN_V7 §3).
 func (c Capabilities) Intersect(o Capabilities) Capabilities {
+	streaming, streamingUnknown := intersectFeature(c.Streaming, c.IsUnknown(CapStreaming), o.Streaming, o.IsUnknown(CapStreaming))
+	tools, toolsUnknown := intersectFeature(c.Tools, c.IsUnknown(CapTools), o.Tools, o.IsUnknown(CapTools))
+	vision, visionUnknown := intersectFeature(c.Vision, c.IsUnknown(CapVision), o.Vision, o.IsUnknown(CapVision))
+	structured, structuredUnknown := intersectFeature(c.StructuredOutput, c.IsUnknown(CapStructuredOutput), o.StructuredOutput, o.IsUnknown(CapStructuredOutput))
+	reasoning, reasoningUnknown := intersectFeature(c.Reasoning, c.IsUnknown(CapReasoning), o.Reasoning, o.IsUnknown(CapReasoning))
+	var unknown CapabilitySet
+	if streamingUnknown {
+		unknown |= capStreamingBit
+	}
+	if toolsUnknown {
+		unknown |= capToolsBit
+	}
+	if visionUnknown {
+		unknown |= capVisionBit
+	}
+	if structuredUnknown {
+		unknown |= capStructuredOutputBit
+	}
+	if reasoningUnknown {
+		unknown |= capReasoningBit
+	}
 	out := Capabilities{
-		Streaming:        c.Streaming && o.Streaming,
-		Tools:            c.Tools && o.Tools,
-		Vision:           c.Vision && o.Vision,
-		StructuredOutput: c.StructuredOutput && o.StructuredOutput,
-		Reasoning:        c.Reasoning && o.Reasoning,
+		Streaming:        streaming,
+		Tools:            tools,
+		Vision:           vision,
+		StructuredOutput: structured,
+		Reasoning:        reasoning,
+		Unknown:          unknown,
 		ContextLength:    minPositive(c.ContextLength, o.ContextLength),
 		MaxOutput:        minPositive(c.MaxOutput, o.MaxOutput),
 	}
 	return out
 }
 
+// State returns the three-valued state of a feature capability.
+func (c Capabilities) State(cap Capability) CapabilityState {
+	if c.IsUnknown(cap) {
+		return CapabilityUnknown
+	}
+	switch cap {
+	case CapStreaming:
+		if c.Streaming {
+			return CapabilitySupported
+		}
+	case CapTools:
+		if c.Tools {
+			return CapabilitySupported
+		}
+	case CapVision:
+		if c.Vision {
+			return CapabilitySupported
+		}
+	case CapStructuredOutput:
+		if c.StructuredOutput {
+			return CapabilitySupported
+		}
+	case CapReasoning:
+		if c.Reasoning {
+			return CapabilitySupported
+		}
+	default:
+		return CapabilityUnknown
+	}
+	return CapabilityUnsupported
+}
+
+// IsUnknown reports whether provider metadata for cap was omitted.
+func (c Capabilities) IsUnknown(cap Capability) bool {
+	return c.Unknown&capabilityBit(cap) != 0
+}
+
+// MarkUnknown marks cap as having unknown provider metadata.
+func (c *Capabilities) MarkUnknown(cap Capability) {
+	if c != nil {
+		c.Unknown |= capabilityBit(cap)
+	}
+}
+
+func capabilityBit(cap Capability) CapabilitySet {
+	switch cap {
+	case CapStreaming:
+		return capStreamingBit
+	case CapTools:
+		return capToolsBit
+	case CapVision:
+		return capVisionBit
+	case CapStructuredOutput:
+		return capStructuredOutputBit
+	case CapReasoning:
+		return capReasoningBit
+	default:
+		return 0
+	}
+}
+
+// intersectFeature is conservative: a definitive unsupported side wins over
+// unknown metadata, while unknown remains visible when every side could still
+// support the feature.
+func intersectFeature(a bool, aUnknown bool, b bool, bUnknown bool) (value bool, unknown bool) {
+	if (!aUnknown && !a) || (!bUnknown && !b) {
+		return false, false
+	}
+	if aUnknown || bUnknown {
+		return a && b, true
+	}
+	return a && b, false
+}
+
 // Supports reports whether this capability set satisfies a single requirement.
 func (c Capabilities) Supports(req RequestRequirements) bool {
-	if req.Streaming && !c.Streaming {
+	if req.Streaming && c.State(CapStreaming) != CapabilitySupported {
 		return false
 	}
-	if req.Tools && !c.Tools {
+	if req.Tools && c.State(CapTools) != CapabilitySupported {
 		return false
 	}
-	if req.Vision && !c.Vision {
+	if req.Vision && c.State(CapVision) != CapabilitySupported {
 		return false
 	}
-	if req.StructuredOutput && !c.StructuredOutput {
+	if req.StructuredOutput && c.State(CapStructuredOutput) != CapabilitySupported {
+		return false
+	}
+	if req.Reasoning && c.State(CapReasoning) != CapabilitySupported {
 		return false
 	}
 	if req.MinContextLength > 0 && c.ContextLength > 0 && c.ContextLength < req.MinContextLength {
@@ -124,7 +252,7 @@ type CanonicalModel struct {
 // ProviderModel is a model offered by one provider; many ProviderModels may map
 // to one CanonicalModelKey.
 type ProviderModel struct {
-	ID           ProviderModelID `json:"id"`
+	ID           ProviderModelID   `json:"id"`
 	CanonicalKey CanonicalModelKey `json:"canonicalKey"`
 	DisplayName  string            `json:"displayName"`
 	Base         Capabilities      `json:"baseCapabilities"`
@@ -194,9 +322,24 @@ type SnapshotRevision int64
 
 // CatalogSnapshot is an immutable catalog snapshot; swap atomically.
 type CatalogSnapshot struct {
-	Revision  SnapshotRevision       `json:"revision"`
-	CreatedAt time.Time              `json:"createdAt"`
+	Revision  SnapshotRevision                  `json:"revision"`
+	CreatedAt time.Time                         `json:"createdAt"`
 	Models    map[ProviderModelID]ProviderModel `json:"models"`
+}
+
+// Clone returns an immutable-view copy of the snapshot and its model map.
+func (s *CatalogSnapshot) Clone() *CatalogSnapshot {
+	if s == nil {
+		return nil
+	}
+	out := *s
+	if s.Models != nil {
+		out.Models = make(map[ProviderModelID]ProviderModel, len(s.Models))
+		for id, pm := range s.Models {
+			out.Models[id] = pm
+		}
+	}
+	return &out
 }
 
 // Validate ensures the snapshot is well-formed.

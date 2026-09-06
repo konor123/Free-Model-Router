@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/konor123/Free-Model-Router/internal/config"
 	"github.com/konor123/Free-Model-Router/internal/gateway"
 	"github.com/konor123/Free-Model-Router/internal/logging"
+	"github.com/konor123/Free-Model-Router/internal/provider"
 	"github.com/konor123/Free-Model-Router/internal/providers/opencode"
 )
 
@@ -39,12 +41,21 @@ func NewLogger(cfg *config.Config) (*logging.Logger, error) {
 
 // Run boots the gateway HTTP server and blocks until ctx is canceled.
 func Run(ctx context.Context, cfg *config.Config, log *logging.Logger) error {
+	return RunWithProvider(ctx, cfg, log, opencode.New(""))
+}
+
+// RunWithProvider boots the same application wiring as Run with an injected
+// provider. The injection keeps production defaults unchanged while allowing
+// an actual HTTP app-to-provider integration test to use a local mock server.
+func RunWithProvider(ctx context.Context, cfg *config.Config, log *logging.Logger, prov provider.Provider) error {
+	if prov == nil {
+		return errors.New("provider must not be nil")
+	}
 	log.Info("Free-Model-Router starting (phase 2)")
 	log.Info("config: %s", cfg.SourcePath)
 	log.Info("log level: %s", cfg.LogLevel)
 	log.Info("gateway bind: %s", cfg.Bind)
 
-	prov := opencode.New("") // default OpenCode Public base URL
 	gw, err := gateway.NewGateway(ctx, prov)
 	if err != nil {
 		return fmt.Errorf("init gateway: %w", err)
@@ -52,10 +63,15 @@ func Run(ctx context.Context, cfg *config.Config, log *logging.Logger) error {
 	gw.StartProbes(ctx)
 	defer gw.StopProbes()
 
+	listener, err := net.Listen("tcp", cfg.Bind)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", cfg.Bind, err)
+	}
+	defer listener.Close()
 	srv := &http.Server{Addr: cfg.Bind, Handler: gw.Handler()}
 	errCh := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()

@@ -18,9 +18,9 @@ import (
 	"github.com/konor123/Free-Model-Router/internal/health"
 	"github.com/konor123/Free-Model-Router/internal/latency"
 	"github.com/konor123/Free-Model-Router/internal/model"
+	"github.com/konor123/Free-Model-Router/internal/probe"
 	"github.com/konor123/Free-Model-Router/internal/provider"
 	"github.com/konor123/Free-Model-Router/internal/providers/opencode"
-	"github.com/konor123/Free-Model-Router/internal/probe"
 	"github.com/konor123/Free-Model-Router/internal/router"
 )
 
@@ -68,6 +68,10 @@ func (g *Gateway) RefreshCatalog(ctx context.Context) error {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	snap, err = g.pool.CommitSnapshot(snap)
+	if err != nil {
+		return err
+	}
 	routes := make(map[model.ProviderModelID][]model.ProviderRoute, len(snap.Models))
 	for id, pm := range snap.Models {
 		routes[id] = opencode.Routes(id, pm.UpstreamID, pm.Base)
@@ -138,22 +142,44 @@ type chatCompletionRequest struct {
 
 // StartProbes starts periodic probing from the gateway's current immutable view.
 func (g *Gateway) StartProbes(ctx context.Context) {
-	g.probes.Start(ctx, func() *probe.Snapshot {
-		g.mu.RLock()
-		defer g.mu.RUnlock()
-		if g.catalog == nil {
-			return nil
-		}
-		routes := make(map[model.ProviderModelID][]model.ProviderRoute, len(g.routes))
-		for id, rs := range g.routes {
-			routes[id] = append([]model.ProviderRoute(nil), rs...)
-		}
-		return &probe.Snapshot{Catalog: g.catalog, Pool: append([]model.ProviderModelID(nil), g.pool.Snapshot().SelectedProviderModelIDs...), Routes: routes, Provider: g.Prov}
-	})
+	g.probes.Start(ctx, g.currentProbeSnapshot)
 }
 
 // StopProbes waits for periodic probes to exit.
 func (g *Gateway) StopProbes() { g.probes.Stop() }
+
+// ProbeOnce runs one synchronous probe cycle against the gateway's current
+// catalog, pool, and routes. It is useful for deterministic control-plane
+// refreshes and integration tests; periodic scheduling uses the same source.
+func (g *Gateway) ProbeOnce(ctx context.Context) {
+	g.probes.RunOnce(ctx, g.currentProbeSnapshot)
+}
+
+func (g *Gateway) currentProbeSnapshot() *probe.Snapshot {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if g.catalog == nil {
+		return nil
+	}
+	routes := make(map[model.ProviderModelID][]model.ProviderRoute, len(g.routes))
+	for id, rs := range g.routes {
+		copied := make([]model.ProviderRoute, len(rs))
+		for i, route := range rs {
+			copied[i] = route
+			if route.CapabilityOverride != nil {
+				caps := *route.CapabilityOverride
+				copied[i].CapabilityOverride = &caps
+			}
+		}
+		routes[id] = copied
+	}
+	return &probe.Snapshot{
+		Catalog:  g.catalog.Clone(),
+		Pool:     append([]model.ProviderModelID(nil), g.pool.Snapshot().SelectedProviderModelIDs...),
+		Routes:   routes,
+		Provider: g.Prov,
+	}
+}
 
 type gatewayTool struct {
 	Type     string `json:"type"`
@@ -186,12 +212,12 @@ type chatCompletionResponse struct {
 	Created int64  `json:"created"`
 	Model   string `json:"model"`
 	Choices []struct {
-		Index int `json:"index"`
+		Index   int `json:"index"`
 		Message struct {
-			Role       string            `json:"role"`
-			Content    string            `json:"content"`
-			ToolCalls  []json.RawMessage `json:"tool_calls,omitempty"`
-			Reasoning  string            `json:"reasoning_content,omitempty"`
+			Role      string            `json:"role"`
+			Content   string            `json:"content"`
+			ToolCalls []json.RawMessage `json:"tool_calls,omitempty"`
+			Reasoning string            `json:"reasoning_content,omitempty"`
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
@@ -252,6 +278,9 @@ func (g *Gateway) ChatHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	release, err := g.health.AcquireSlot(r.Context(), route.Provider)
 	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		writeError(w, http.StatusServiceUnavailable, "route slot unavailable")
 		return
 	}
@@ -259,7 +288,12 @@ func (g *Gateway) ChatHandler(w http.ResponseWriter, r *http.Request) {
 	timer := latency.Start()
 	stream, err := g.Prov.ChatCompletion(r.Context(), route, normalized)
 	if err != nil {
-		g.health.RouteFailure(string(route.ID), 0)
+		if r.Context().Err() != nil {
+			return
+		}
+		if shouldRecordRouteFailure(r.Context(), err) {
+			g.health.RouteFailure(string(route.ID), 0)
+		}
 		g.writeUpstreamError(w, err)
 		return
 	}
@@ -269,22 +303,38 @@ func (g *Gateway) ChatHandler(w http.ResponseWriter, r *http.Request) {
 		// Aggregate the (one-shot) stream into a standard response.
 		var sb strings.Builder
 		recordedTTFT := false
+		var ttftMs float64
 		var toolCalls []json.RawMessage
 		var reasoning strings.Builder
 		finish := ""
 		for {
 			ev, err := stream.Next(r.Context())
 			if errors.Is(err, io.EOF) {
+				if !recordedTTFT {
+					if shouldRecordRouteFailure(r.Context(), errors.New("upstream ended before first semantic event")) {
+						g.latency.RecordRequest(string(route.ID), 0, durationMilliseconds(timer.Elapsed()))
+						g.health.RouteFailure(string(route.ID), 0)
+					}
+					writeError(w, http.StatusBadGateway, "upstream ended before first semantic event")
+					return
+				}
 				break
 			}
 			if err != nil {
+				if r.Context().Err() != nil {
+					return
+				}
+				if shouldRecordRouteFailure(r.Context(), err) {
+					g.latency.RecordRequest(string(route.ID), ttftMs, durationMilliseconds(timer.Elapsed()))
+					g.health.RouteFailure(string(route.ID), 0)
+				}
 				g.writeUpstreamError(w, err)
 				return
 			}
 			sb.WriteString(ev.DeltaText)
 			if ev.Semantic() && !recordedTTFT {
 				if d, ok := timer.OnSemanticEvent(); ok {
-					g.latency.RecordRequest(string(route.ID), float64(d.Milliseconds()), 0)
+					ttftMs = durationMilliseconds(d)
 					recordedTTFT = true
 				}
 			}
@@ -298,7 +348,7 @@ func (g *Gateway) ChatHandler(w http.ResponseWriter, r *http.Request) {
 			ID: "chatcmpl-afm", Object: "chat.completion", Model: string(pick),
 		}
 		resp.Choices = append(resp.Choices, struct {
-			Index int `json:"index"`
+			Index   int `json:"index"`
 			Message struct {
 				Role      string            `json:"role"`
 				Content   string            `json:"content"`
@@ -313,48 +363,36 @@ func (g *Gateway) ChatHandler(w http.ResponseWriter, r *http.Request) {
 		resp.Choices[0].Message.Reasoning = reasoning.String()
 		resp.Choices[0].FinishReason = finish
 		writeJSON(w, http.StatusOK, resp)
+		g.latency.RecordRequest(string(route.ID), ttftMs, durationMilliseconds(timer.Elapsed()))
 		g.health.RouteSuccess(string(route.ID))
 		return
 	}
 
-	// Streaming: commit SSE downstream only once we can validate the candidate
-	// (Phase 2 simple version: buffer nothing beyond headers; commit guard lands in Phase 8).
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming unsupported")
 		return
 	}
 
-	flush := func() {
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
+	// Do not commit response headers until the first semantic upstream event.
+	// This keeps a pre-semantic upstream failure representable as a normal HTTP
+	// error and leaves the request path ready for Phase 7 fallback.
+	committed := false
+	recordedTTFT := false
+	var ttftMs float64
+	commit := func() {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		committed = true
 	}
-	_ = flusher
-
-	for {
-		ev, err := stream.Next(r.Context())
-		if errors.Is(err, io.EOF) {
-			fmt.Fprint(w, "data: [DONE]\n\n")
-			flush()
-			return
-		}
-		if err != nil {
-			// After downstream commit we cannot fallback (Phase 8 formalizes this).
-			fmt.Fprintf(w, "data: {\"error\": %q}\n\n", err.Error())
-			flush()
-			return
-		}
+	flush := func() { flusher.Flush() }
+	writeChunk := func(ev provider.StreamEvent) {
 		var chunk chatCompletionChunk
 		chunk.ID = "chatcmpl-afm"
 		chunk.Object = "chat.completion.chunk"
 		chunk.Model = string(pick)
-		var c chatCompletionChunk
-		c.ID, c.Object, c.Model = "chatcmpl-afm", "chat.completion.chunk", string(pick)
-		c.Choices = append(c.Choices, struct {
+		chunk.Choices = append(chunk.Choices, struct {
 			Index int `json:"index"`
 			Delta struct {
 				Content          string            `json:"content,omitempty"`
@@ -363,23 +401,110 @@ func (g *Gateway) ChatHandler(w http.ResponseWriter, r *http.Request) {
 			} `json:"delta"`
 			FinishReason any `json:"finish_reason"`
 		}{})
-		c.Choices[0].Index = ev.ChoiceIndex
-		c.Choices[0].Delta.Content = ev.DeltaText
-		c.Choices[0].Delta.ToolCalls = ev.ToolCalls
-		c.Choices[0].Delta.ReasoningContent = ev.ReasoningContent
+		chunk.Choices[0].Index = ev.ChoiceIndex
+		chunk.Choices[0].Delta.Content = ev.DeltaText
+		chunk.Choices[0].Delta.ToolCalls = ev.ToolCalls
+		chunk.Choices[0].Delta.ReasoningContent = ev.ReasoningContent
 		if ev.FinishReason != "" {
-			c.Choices[0].FinishReason = ev.FinishReason
+			chunk.Choices[0].FinishReason = ev.FinishReason
 		}
-		chunk = c
 		data, _ := json.Marshal(chunk)
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flush()
-		if ev.FinishReason != "" {
+	}
+
+	for {
+		ev, err := stream.Next(r.Context())
+		if errors.Is(err, io.EOF) {
+			if !committed {
+				if r.Context().Err() != nil {
+					return
+				}
+				if shouldRecordRouteFailure(r.Context(), errors.New("upstream ended before first semantic event")) {
+					g.health.RouteFailure(string(route.ID), 0)
+				}
+				writeError(w, http.StatusBadGateway, "upstream ended before first semantic event")
+				return
+			}
 			fmt.Fprint(w, "data: [DONE]\n\n")
+			flush()
+			g.latency.RecordRequest(string(route.ID), ttftMs, durationMilliseconds(timer.Elapsed()))
+			g.health.RouteSuccess(string(route.ID))
+			return
+		}
+		if err != nil {
+			if !committed {
+				if r.Context().Err() != nil {
+					return
+				}
+				if shouldRecordRouteFailure(r.Context(), err) {
+					g.health.RouteFailure(string(route.ID), 0)
+				}
+				g.writeUpstreamError(w, err)
+				return
+			}
+			// After downstream commit we cannot fallback. A disconnected client
+			// also must not poison route health.
+			if isRequestCanceled(r.Context(), err) {
+				return
+			}
+			if shouldRecordRouteFailure(r.Context(), err) {
+				g.health.RouteFailure(string(route.ID), 0)
+			}
+			g.latency.RecordRequest(string(route.ID), ttftMs, durationMilliseconds(timer.Elapsed()))
+			writeSSEError(w, err)
 			flush()
 			return
 		}
+		if !ev.Semantic() {
+			continue
+		}
+		if !recordedTTFT {
+			if d, ok := timer.OnSemanticEvent(); ok {
+				ttftMs = durationMilliseconds(d)
+				recordedTTFT = true
+			}
+		}
+		if !committed {
+			commit()
+		}
+		writeChunk(ev)
+		if ev.FinishReason != "" {
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			flush()
+			g.latency.RecordRequest(string(route.ID), ttftMs, durationMilliseconds(timer.Elapsed()))
+			g.health.RouteSuccess(string(route.ID))
+			return
+		}
 	}
+}
+
+func durationMilliseconds(d time.Duration) float64 {
+	return float64(d) / float64(time.Millisecond)
+}
+
+func shouldRecordRouteFailure(ctx context.Context, err error) bool {
+	if isRequestCanceled(ctx, err) {
+		return false
+	}
+	var unsupported *provider.UnsupportedError
+	return !errors.As(err, &unsupported)
+}
+
+func isRequestCanceled(ctx context.Context, err error) bool {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var failureErr *provider.FailureError
+	return errors.As(err, &failureErr) && failureErr.Failure.Class == model.FailureCanceled
+}
+
+func writeSSEError(w http.ResponseWriter, err error) {
+	payload, marshalErr := json.Marshal(map[string]any{"error": map[string]string{"message": err.Error()}})
+	if marshalErr != nil {
+		return
+	}
+	fmt.Fprintf(w, "data: %s\n\n", payload)
 }
 
 func (g *Gateway) resolveCandidate(req chatCompletionRequest) (model.ProviderModelID, model.ProviderRoute, bool) {
@@ -392,6 +517,7 @@ func (g *Gateway) resolveCandidate(req chatCompletionRequest) (model.ProviderMod
 	if req.Model != "" && req.Model != ExternalAutoModel {
 		in.ExplicitID = model.ProviderModelID(req.Model)
 	}
+	in.Reqs.Streaming = req.Stream
 	in.Reqs.Tools = len(req.Tools) > 0 || len(req.ToolChoice) > 0
 	in.Reqs.StructuredOutput = len(req.ResponseFormat) > 0
 	in.Reqs.Reasoning = len(req.Reasoning) > 0
@@ -413,6 +539,11 @@ func (g *Gateway) resolveCandidate(req chatCompletionRequest) (model.ProviderMod
 }
 
 func (g *Gateway) writeUpstreamError(w http.ResponseWriter, err error) {
+	var unsupported *provider.UnsupportedError
+	if errors.As(err, &unsupported) {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	var fe *provider.FailureError
 	if errors.As(err, &fe) {
 		action := model.DecideFailureAction(fe.Failure)
