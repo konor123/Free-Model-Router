@@ -22,9 +22,10 @@ compatible attach/start ownership, provider menu state, and file-based autostart
 Phase 16 model-manager filtering, route performance metadata, routing scores, and
 typed control-client mutations implemented.
 Phase 17 live redacted usage events, SSE delivery, and usage-window filters implemented.
-Phase 18 Windows sidecar metadata, package manifest, portable ZIP workflow, and
-separate packaging validation command implemented. Native Tauri and clean-VM
-installer gates remain environment-blocked.
+Phase 18 Windows sidecar metadata, package manifest, native Tauri shell, local
+NSIS/MSI bundle build, portable ZIP workflow, and separate packaging validation
+command implemented. Clean-VM installer, first-run, autostart, upgrade, and
+uninstall gates remain environment-dependent.
 
 ## Layout
 
@@ -42,6 +43,7 @@ internal/control       authenticated desktop/CLI control API [Phase 13+]
 internal/security      bind and bearer-token policy [Phase 14+]
 internal/desktop       tray-shell lifecycle contracts [Phase 15+]
 internal/packaging     sidecar metadata and release manifest [Phase 18+]
+desktop/src-tauri      native Tauri tray and control shell [Phase 18+]
 ```
 
 Dependency rule (see PLAN_V7 §4):
@@ -124,12 +126,12 @@ authentication. The management listener is always validated as loopback-only,
 regardless of the inference bind. Authentication tokens and other secrets are
 never written to application logs or control responses.
 
-The desktop lifecycle core deliberately keeps native tray rendering in a shell
-adapter. It provides atomic profile leases, stale-owner recovery, API-major
-compatible attach decisions, explicit `desktop-managed` versus `external`
-ownership, and user-scoped file autostart without adding runtime Node, npm, or
-Rust requirements. Native Tauri packaging is covered by the later desktop
-scaffold and Windows packaging phase.
+The desktop lifecycle core provides atomic profile leases, stale-owner recovery,
+API-major compatible attach decisions, explicit `desktop-managed` versus `external`
+ownership, and user-scoped file autostart. The native Tauri shell renders the tray,
+owns the single-instance focus callback, starts or attaches the Go sidecar, and
+opens the model-manager and usage-log windows. Node, npm, and Rust remain build-time
+requirements only.
 
 ## Windows packaging
 
@@ -140,12 +142,23 @@ distinguishes build-time Node/npm/Rust requirements from the end-user runtime,
 which requires none of those tools. The separate `fmr.exe` control CLI is
 included in the portable package.
 
-From Windows, run `.\scripts\package-windows.ps1 -Version v0.18.0` to build the
-Go sidecar and CLI, generate `manifest.json`, and create a versioned ZIP. Pass
-`-DesktopExecutable path\to\desktop.exe` when a Tauri artifact is available.
-The workflow intentionally does not claim native Tauri or clean-VM install,
-first-run, autostart, upgrade, and uninstall validation until those external
-gates are run.
+From Windows, run:
+
+```powershell
+.\scripts\package-windows.ps1 `
+  -Version v0.18.0 `
+  -DesktopExecutable desktop\src-tauri\target\release\free-model-router-desktop.exe
+```
+
+after:
+
+```powershell
+cargo build --manifest-path desktop\src-tauri\Cargo.toml --release
+```
+
+The workflow performs that build and validates the resulting manifest. Clean-VM
+install, first-run, autostart, upgrade, and uninstall validation still require a
+separate Windows VM.
 
 The model-manager API exposes model and route performance fields including TTFT,
 latency score, benchmark performance, confidence, and routing score. The typed

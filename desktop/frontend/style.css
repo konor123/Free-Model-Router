@@ -1,0 +1,43 @@
+:root {
+  color: #e2e8f0;
+  background: #0f172a;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 640px; background: linear-gradient(145deg, #0f172a, #172554); }
+main { max-width: 1180px; margin: 0 auto; padding: 28px; }
+h1, h2, h3 { margin-top: 0; }
+h1 { font-size: 28px; }
+h2 { font-size: 20px; margin-bottom: 12px; }
+p { color: #94a3b8; }
+button, input, select { font: inherit; }
+button { border: 0; border-radius: 8px; padding: 9px 13px; color: #e2e8f0; background: #2563eb; cursor: pointer; }
+button:hover { background: #3b82f6; }
+button.secondary { background: #334155; }
+button.danger { background: #b91c1c; }
+button:disabled { opacity: .55; cursor: default; }
+.toolbar, .actions, .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.toolbar { justify-content: space-between; margin-bottom: 20px; }
+.actions { margin: 12px 0 20px; }
+.card { background: rgba(15, 23, 42, .78); border: 1px solid #334155; border-radius: 14px; padding: 18px; margin-bottom: 16px; box-shadow: 0 12px 30px rgba(2, 6, 23, .25); }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }
+.stat { background: #1e293b; border-radius: 10px; padding: 13px; }
+.stat small { display: block; color: #94a3b8; margin-bottom: 4px; }
+.status-ready { color: #4ade80; }
+.status-error { color: #f87171; }
+.status-warn { color: #facc15; }
+input[type="search"], select { background: #0f172a; color: #e2e8f0; border: 1px solid #475569; border-radius: 8px; padding: 9px 10px; min-width: 190px; }
+label.checkbox { display: inline-flex; gap: 7px; align-items: center; color: #cbd5e1; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #334155; vertical-align: top; }
+th { color: #93c5fd; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
+td code { color: #bfdbfe; }
+.badge { display: inline-block; border-radius: 999px; padding: 3px 8px; background: #334155; color: #cbd5e1; font-size: 12px; margin: 2px; }
+.badge.good { background: #14532d; color: #bbf7d0; }
+.badge.warn { background: #713f12; color: #fef08a; }
+.muted { color: #94a3b8; }
+.error { color: #fecaca; background: #450a0a; border: 1px solid #991b1b; border-radius: 8px; padding: 10px; }
+.empty { padding: 24px; text-align: center; color: #94a3b8; }
+@media (max-width: 760px) { body { min-width: 0; } main { padding: 16px; } th:nth-child(n+5), td:nth-child(n+5) { display: none; } }

@@ -2,6 +2,9 @@
 Free-Model-Router
 Free-Model-Router.exe
 dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/node_modules/
 
 # Go
 *.test

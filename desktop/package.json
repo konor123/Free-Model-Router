@@ -1,0 +1,12 @@
+{
+  "name": "free-model-router-desktop",
+  "private": true,
+  "version": "0.7.1",
+  "scripts": {
+    "tauri": "tauri",
+    "test": "node --test frontend/app.test.js"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}
