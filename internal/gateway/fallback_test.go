@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -54,6 +55,17 @@ func (p *fallbackProvider) Calls() []string {
 func successFallbackStream(content string) provider.ChatStream {
 	return &scriptedStream{steps: []scriptedStep{{event: provider.StreamEvent{DeltaText: content, FinishReason: "stop"}}}}
 }
+
+type cancelingStream struct {
+	cancel context.CancelFunc
+}
+
+func (s *cancelingStream) Next(context.Context) (provider.StreamEvent, error) {
+	s.cancel()
+	return provider.StreamEvent{}, context.Canceled
+}
+
+func (s *cancelingStream) Close() error { return nil }
 
 func doFallbackRequest(t *testing.T, g *Gateway, body string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -244,6 +256,115 @@ func TestStreamingPreSemanticFailureFallsBack(t *testing.T) {
 	calls := p.Calls()
 	if len(calls) != 2 || calls[0] != "opencode-public::a" || calls[1] != "opencode-public::b" {
 		t.Fatalf("stream fallback calls = %v", calls)
+	}
+}
+
+func TestStreamingPostTextFailureDoesNotFallback(t *testing.T) {
+	p := &fallbackProvider{models: []string{"a", "b"}}
+	p.behavior = func(_ context.Context, route model.ProviderRoute, _ provider.NormalizedRequest) (provider.ChatStream, error) {
+		if strings.HasSuffix(string(route.ID), "::a") {
+			return &scriptedStream{steps: []scriptedStep{
+				{event: provider.StreamEvent{DeltaText: "partial"}},
+				{err: errors.New("late text failure")},
+			}}, nil
+		}
+		return successFallbackStream("fallback"), nil
+	}
+	g, err := NewGatewayWithFailoverPolicy(context.Background(), p, FailoverPolicy{MaxAttempts: 4, Budget: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := doFallbackRequest(t, g, `{"model":"fmr/auto","stream":true,"messages":[{"role":"user","content":"x"}]}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "partial") || !strings.Contains(w.Body.String(), "late text failure") {
+		t.Fatalf("post-text failure response = %d %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "fallback") {
+		t.Fatalf("post-text failure must not mix a fallback stream: %s", w.Body.String())
+	}
+	if calls := p.Calls(); len(calls) != 1 || calls[0] != "opencode-public::a" {
+		t.Fatalf("post-text failure calls = %v, want only model a", calls)
+	}
+}
+
+func TestStreamingPostToolCallFailureDoesNotFallback(t *testing.T) {
+	p := &fallbackProvider{models: []string{"a", "b"}}
+	p.behavior = func(_ context.Context, route model.ProviderRoute, _ provider.NormalizedRequest) (provider.ChatStream, error) {
+		if strings.HasSuffix(string(route.ID), "::a") {
+			return &scriptedStream{steps: []scriptedStep{
+				{event: provider.StreamEvent{ToolCalls: []json.RawMessage{json.RawMessage(`{"id":"call-1","type":"function"}`)}}},
+				{err: errors.New("late tool failure")},
+			}}, nil
+		}
+		return successFallbackStream("fallback"), nil
+	}
+	g, err := NewGatewayWithFailoverPolicy(context.Background(), p, FailoverPolicy{MaxAttempts: 4, Budget: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := doFallbackRequest(t, g, `{"model":"fmr/auto","stream":true,"messages":[{"role":"user","content":"x"}]}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "call-1") || !strings.Contains(w.Body.String(), "late tool failure") {
+		t.Fatalf("post-tool failure response = %d %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "fallback") {
+		t.Fatalf("post-tool failure must not mix a fallback stream: %s", w.Body.String())
+	}
+	if calls := p.Calls(); len(calls) != 1 || calls[0] != "opencode-public::a" {
+		t.Fatalf("post-tool failure calls = %v, want only model a", calls)
+	}
+}
+
+func TestStreamingHeadersOnlyFailureFallsBack(t *testing.T) {
+	p := &fallbackProvider{models: []string{"a", "b"}}
+	p.behavior = func(_ context.Context, route model.ProviderRoute, _ provider.NormalizedRequest) (provider.ChatStream, error) {
+		if strings.HasSuffix(string(route.ID), "::a") {
+			return &scriptedStream{steps: []scriptedStep{
+				{event: provider.StreamEvent{}},
+				{err: provider.NewFailureError(model.NewFailure(model.FailureTimeout, model.ScopeRoute), errors.New("headers timeout"))},
+			}}, nil
+		}
+		return successFallbackStream("fallback"), nil
+	}
+	g, err := NewGatewayWithFailoverPolicy(context.Background(), p, FailoverPolicy{MaxAttempts: 4, Budget: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := doFallbackRequest(t, g, `{"model":"fmr/auto","stream":true,"messages":[{"role":"user","content":"x"}]}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "fallback") {
+		t.Fatalf("headers-only fallback response = %d %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "headers timeout") {
+		t.Fatalf("headers-only failure must not leak upstream error: %s", w.Body.String())
+	}
+	calls := p.Calls()
+	if len(calls) != 2 || calls[0] != "opencode-public::a" || calls[1] != "opencode-public::b" {
+		t.Fatalf("headers-only fallback calls = %v", calls)
+	}
+}
+
+func TestStreamingClientDisconnectDoesNotFallback(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := &fallbackProvider{models: []string{"a", "b"}}
+	p.behavior = func(_ context.Context, route model.ProviderRoute, _ provider.NormalizedRequest) (provider.ChatStream, error) {
+		if strings.HasSuffix(string(route.ID), "::a") {
+			return &cancelingStream{cancel: cancel}, nil
+		}
+		return successFallbackStream("fallback"), nil
+	}
+	g, err := NewGatewayWithFailoverPolicy(context.Background(), p, FailoverPolicy{MaxAttempts: 4, Budget: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"fmr/auto","stream":true,"messages":[{"role":"user","content":"x"}]}`)).WithContext(ctx)
+	g.ChatHandler(w, r)
+
+	if calls := p.Calls(); len(calls) != 1 || calls[0] != "opencode-public::a" {
+		t.Fatalf("client disconnect calls = %v, want only model a", calls)
+	}
+	if w.Body.Len() != 0 {
+		t.Fatalf("client disconnect must not write a fallback response: %s", w.Body.String())
 	}
 }
 
