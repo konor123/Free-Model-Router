@@ -14,10 +14,12 @@ import (
 	"github.com/konor123/Free-Model-Router/internal/catalog"
 	"github.com/konor123/Free-Model-Router/internal/health"
 	"github.com/konor123/Free-Model-Router/internal/latency"
+	"github.com/konor123/Free-Model-Router/internal/matcher"
 	"github.com/konor123/Free-Model-Router/internal/model"
 	"github.com/konor123/Free-Model-Router/internal/probe"
 	"github.com/konor123/Free-Model-Router/internal/provider"
 	"github.com/konor123/Free-Model-Router/internal/providers/opencode"
+	"github.com/konor123/Free-Model-Router/internal/scoring"
 )
 
 // ExternalAutoModel is the external model id meaning "route over the whole pool".
@@ -35,17 +37,19 @@ func isAutoModel(id string) bool {
 type Gateway struct {
 	Prov provider.Provider
 
-	mu         sync.RWMutex
-	catalog    *model.CatalogSnapshot
-	routes     map[model.ProviderModelID][]model.ProviderRoute
-	pool       *catalog.Store
-	reconciler *catalog.Reconciler
-	health     *health.Manager
-	latency    *latency.Registry
-	probes     *probe.Scheduler
-	autoPick   model.ProviderModelID
-	autoRoute  model.ProviderRoute
-	failover   FailoverPolicy
+	mu                sync.RWMutex
+	catalog           *model.CatalogSnapshot
+	routes            map[model.ProviderModelID][]model.ProviderRoute
+	pool              *catalog.Store
+	reconciler        *catalog.Reconciler
+	health            *health.Manager
+	latency           *latency.Registry
+	probes            *probe.Scheduler
+	autoPick          model.ProviderModelID
+	autoRoute         model.ProviderRoute
+	failover          FailoverPolicy
+	benchmarkSnapshot scoring.Snapshot
+	benchmarkBindings map[model.ProviderModelID]matcher.BenchmarkBinding
 }
 
 // NewGateway builds a Gateway and performs the initial catalog discovery.
@@ -61,12 +65,13 @@ func NewGatewayWithFailoverPolicy(ctx context.Context, p provider.Provider, poli
 		return nil, errors.New("provider must not be nil")
 	}
 	g := &Gateway{
-		Prov:       p,
-		pool:       catalog.NewStore(catalog.NewPoolState(nil)),
-		reconciler: catalog.NewReconciler(),
-		health:     health.New(),
-		latency:    latency.NewRegistry(),
-		failover:   policy.normalized(),
+		Prov:              p,
+		pool:              catalog.NewStore(catalog.NewPoolState(nil)),
+		reconciler:        catalog.NewReconciler(),
+		health:            health.New(),
+		latency:           latency.NewRegistry(),
+		failover:          policy.normalized(),
+		benchmarkBindings: make(map[model.ProviderModelID]matcher.BenchmarkBinding),
 	}
 	g.probes = probe.New(g.latency, g.health, 30*time.Second)
 	if err := g.RefreshCatalog(ctx); err != nil {
@@ -105,6 +110,7 @@ func (g *Gateway) RefreshCatalog(ctx context.Context) error {
 		return reconcileErr
 	}
 	g.catalog, g.routes = snap, routes
+	g.rebuildBenchmarkBindingsLocked()
 	g.autoPick, g.autoRoute = "", model.ProviderRoute{}
 	for id := range snap.Models {
 		g.autoPick = id

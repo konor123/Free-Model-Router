@@ -223,7 +223,7 @@ func (g *Gateway) resolveAttemptCandidates(req chatCompletionRequest) []attemptC
 	if req.Model != "" && !isAutoModel(req.Model) {
 		pinned := base
 		pinned.ExplicitID = model.ProviderModelID(req.Model)
-		normal = router.Rank(router.Filter(pinned).Eligible, g.latency.EffectiveTTFT)
+		normal = g.rankCandidates(router.Filter(pinned).Eligible)
 		// An explicit model remains authoritative for eligibility. Its selected
 		// pool fallback is added only after the pinned model has a valid route.
 		if len(normal) == 0 {
@@ -231,9 +231,9 @@ func (g *Gateway) resolveAttemptCandidates(req chatCompletionRequest) []attemptC
 		}
 		pool := base
 		pool.ExplicitID = ""
-		normal = append(normal, rankedUnique(router.Filter(pool).Eligible, g.latency.EffectiveTTFT, normal)...)
+		normal = append(normal, g.rankedUnique(router.Filter(pool).Eligible, normal)...)
 	} else {
-		normal = router.Rank(router.Filter(base).Eligible, g.latency.EffectiveTTFT)
+		normal = g.rankCandidates(router.Filter(base).Eligible)
 	}
 
 	result := make([]attemptCandidate, 0, len(normal)+len(normal))
@@ -262,7 +262,7 @@ func (g *Gateway) resolveAttemptCandidates(req chatCompletionRequest) []attemptC
 	} else {
 		unknown = router.Filter(unknownInput).Eligible
 	}
-	unknown = router.Rank(unknown, g.latency.EffectiveTTFT)
+	unknown = g.rankCandidates(unknown)
 	for _, candidate := range unknown {
 		if normalRoutes[candidate.Route.ID] || !normalModels[candidate.Model.ID] || candidate.Route.EffectiveAccess() != model.AccessUnknown {
 			continue
@@ -294,22 +294,6 @@ func (g *Gateway) filterInputLocked(req chatCompletionRequest) router.FilterInpu
 		}
 	}
 	return in
-}
-
-func rankedUnique(candidates []router.Candidate, ttft router.TTFTLookup, existing []router.Candidate) []router.Candidate {
-	seen := make(map[model.RouteID]bool, len(existing)+len(candidates))
-	for _, candidate := range existing {
-		seen[candidate.Route.ID] = true
-	}
-	result := make([]router.Candidate, 0, len(candidates))
-	for _, candidate := range router.Rank(candidates, ttft) {
-		if seen[candidate.Route.ID] {
-			continue
-		}
-		seen[candidate.Route.ID] = true
-		result = append(result, candidate)
-	}
-	return result
 }
 
 func nextAttemptCandidate(candidates []attemptCandidate, attempted map[model.RouteID]bool, previous *router.Candidate, action model.FailureAction) (attemptCandidate, bool) {

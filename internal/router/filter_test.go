@@ -245,6 +245,52 @@ func TestProtocolVetoApplied(t *testing.T) {
 	}
 }
 
+func TestRankWithScorePrefersPerformanceAfterEligibility(t *testing.T) {
+	fast := Candidate{
+		Model: model.ProviderModel{ID: "opencode/fast-model"},
+		Route: route("fast-route", "opencode/fast-model", model.AccessFree, nil),
+	}
+	slow := Candidate{
+		Model: model.ProviderModel{ID: "opencode/slow-model"},
+		Route: route("slow-route", "opencode/slow-model", model.AccessFree, nil),
+	}
+	candidates := []Candidate{fast, slow}
+	got := RankWithScore(candidates, func(routeID string) (float64, bool) {
+		if routeID == "fast-route" {
+			return 10, true
+		}
+		return 100, true
+	}, func(candidate Candidate) (float64, bool) {
+		if candidate.Model.ID == "opencode/slow-model" {
+			return 90, true
+		}
+		return 10, true
+	})
+	if len(got) != 2 || got[0].Model.ID != "opencode/slow-model" {
+		t.Fatalf("score ranking = %+v, want slow model first", got)
+	}
+	if candidates[0].Model.ID != "opencode/fast-model" {
+		t.Fatal("score ranking must not mutate input")
+	}
+}
+
+func TestRankWithScoreFallsBackToTTFTWithoutScores(t *testing.T) {
+	fast := Candidate{
+		Model: model.ProviderModel{ID: "opencode/fast-model"},
+		Route: route("fast-route", "opencode/fast-model", model.AccessFree, nil),
+	}
+	slow := Candidate{
+		Model: model.ProviderModel{ID: "opencode/slow-model"},
+		Route: route("slow-route", "opencode/slow-model", model.AccessFree, nil),
+	}
+	got := RankWithScore([]Candidate{slow, fast}, func(routeID string) (float64, bool) {
+		return map[string]float64{"fast-route": 10, "slow-route": 100}[routeID], true
+	}, nil)
+	if len(got) != 2 || got[0].Model.ID != "opencode/fast-model" {
+		t.Fatalf("no-score ranking = %+v, want fast model first", got)
+	}
+}
+
 func mustLookup(t *testing.T, in FilterInput, name string) model.ProviderModelID {
 	t.Helper()
 	// names map to model suffix in buildFilter

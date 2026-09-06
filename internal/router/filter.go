@@ -4,6 +4,7 @@
 package router
 
 import (
+	"math"
 	"sort"
 
 	"github.com/konor123/Free-Model-Router/internal/health"
@@ -143,30 +144,70 @@ func routeAccessAllowed(a model.AccessClass, allowPaid, allowUnknown bool) bool 
 // Returning ok=false means that no probe or request sample is available yet.
 type TTFTLookup func(routeID string) (ms float64, ok bool)
 
+// ScoreLookup returns a higher-is-better routing score for a candidate.
+// Returning ok=false excludes the score from ordering and preserves the TTFT
+// and identity fallback order.
+type ScoreLookup func(candidate Candidate) (score float64, ok bool)
+
 // Rank returns a deterministic copy of candidates ordered by known TTFT,
 // then ProviderModelID, then RouteID. Health and eligibility filtering happen
 // before ranking, so unavailable routes are never resurrected by this helper.
 func Rank(candidates []Candidate, ttft TTFTLookup) []Candidate {
+	return RankWithScore(candidates, ttft, nil)
+}
+
+// RankWithScore orders eligible candidates by an optional higher-is-better
+// score, then falls back to known TTFT, ProviderModelID, and RouteID. The
+// existing Rank behavior is unchanged when score is nil or unavailable.
+func RankWithScore(candidates []Candidate, ttft TTFTLookup, score ScoreLookup) []Candidate {
 	out := append([]Candidate(nil), candidates...)
 	sort.SliceStable(out, func(i, j int) bool {
-		left, leftOK := 0.0, false
-		right, rightOK := 0.0, false
-		if ttft != nil {
-			left, leftOK = ttft(string(out[i].Route.ID))
-			right, rightOK = ttft(string(out[j].Route.ID))
+		if score != nil {
+			left, leftOK := validRankScore(score(out[i]))
+			right, rightOK := validRankScore(score(out[j]))
+			if leftOK != rightOK {
+				return leftOK
+			}
+			if leftOK && left != right {
+				return left > right
+			}
 		}
-		if leftOK != rightOK {
-			return leftOK
-		}
-		if leftOK && left != right {
-			return left < right
-		}
-		if out[i].Model.ID != out[j].Model.ID {
-			return string(out[i].Model.ID) < string(out[j].Model.ID)
-		}
-		return string(out[i].Route.ID) < string(out[j].Route.ID)
+		return rankByTTFT(out[i], out[j], ttft)
 	})
 	return out
+}
+
+func rankByTTFT(leftCandidate, rightCandidate Candidate, ttft TTFTLookup) bool {
+	left, leftOK := 0.0, false
+	right, rightOK := 0.0, false
+	if ttft != nil {
+		left, leftOK = validTTFT(ttft(string(leftCandidate.Route.ID)))
+		right, rightOK = validTTFT(ttft(string(rightCandidate.Route.ID)))
+	}
+	if leftOK != rightOK {
+		return leftOK
+	}
+	if leftOK && left != right {
+		return left < right
+	}
+	if leftCandidate.Model.ID != rightCandidate.Model.ID {
+		return string(leftCandidate.Model.ID) < string(rightCandidate.Model.ID)
+	}
+	return string(leftCandidate.Route.ID) < string(rightCandidate.Route.ID)
+}
+
+func validRankScore(score float64, ok bool) (float64, bool) {
+	if !ok || math.IsNaN(score) || math.IsInf(score, 0) {
+		return 0, false
+	}
+	return score, true
+}
+
+func validTTFT(ms float64, ok bool) (float64, bool) {
+	if !ok || math.IsNaN(ms) || math.IsInf(ms, 0) || ms < 0 {
+		return 0, false
+	}
+	return ms, true
 }
 
 // ids resolves the candidate id list: explicit wins, else pool.

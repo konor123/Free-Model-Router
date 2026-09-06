@@ -10,6 +10,7 @@ Plan of record: [PLAN_V7.md](PLAN_V7.md).
 Phase 0–6.5 runtime integration complete.
 Phase 7 ranked, failure-aware fallback implemented.
 Phase 8 streaming commit guard validated.
+Phase 9 benchmark matching, confidence-aware scoring, and runtime ranking integrated.
 
 ## Layout
 
