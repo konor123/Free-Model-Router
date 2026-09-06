@@ -39,6 +39,11 @@ type PersistedConfig struct {
 	// Bind is the inference API bind address. Default 127.0.0.1 (PLAN_V7 §18).
 	Bind string `json:"bind"`
 
+	// ManagementBind is the localhost-only control API bind address. It is kept
+	// separate from Bind so an inference API may be exposed deliberately without
+	// exposing management operations.
+	ManagementBind string `json:"managementBind"`
+
 	// LogLevel: debug | info | warn | error.
 	LogLevel string `json:"logLevel"`
 
@@ -51,6 +56,10 @@ type PersistedConfig struct {
 	// PinnedModel is the optional primary model. When set, it must be in
 	// ModelPool so a stale pin cannot bypass pool membership.
 	PinnedModel string `json:"pinnedModel,omitempty"`
+
+	// ModelPoolMode preserves whether the user wants automatic or manual pool
+	// reconciliation. The empty legacy value is treated as Automatic.
+	ModelPoolMode string `json:"modelPoolMode,omitempty"`
 }
 
 // Config is retained as a source-compatible name for callers from Phase 0.
@@ -65,9 +74,11 @@ func Defaults() *Config {
 // PersistedDefaults returns built-in defaults for a persisted configuration.
 func PersistedDefaults() *PersistedConfig {
 	return &PersistedConfig{
-		SchemaVersion: CurrentSchemaVersion,
-		Bind:          "127.0.0.1:8787",
-		LogLevel:      "info",
+		SchemaVersion:  CurrentSchemaVersion,
+		Bind:           "127.0.0.1:8787",
+		ManagementBind: "127.0.0.1:8788",
+		LogLevel:       "info",
+		ModelPoolMode:  "Automatic",
 	}
 }
 
@@ -219,6 +230,13 @@ func SavePersisted(path string, cfg *PersistedConfig) error {
 	if toSave.SchemaVersion == 0 {
 		toSave.SchemaVersion = CurrentSchemaVersion
 	}
+	defaults := PersistedDefaults()
+	if toSave.ManagementBind == "" {
+		toSave.ManagementBind = defaults.ManagementBind
+	}
+	if toSave.ModelPoolMode == "" {
+		toSave.ModelPoolMode = defaults.ModelPoolMode
+	}
 	if err := toSave.validate(); err != nil {
 		return err
 	}
@@ -245,10 +263,16 @@ func (c *PersistedConfig) validate() error {
 	if c.Bind == "" {
 		return errors.New("config: bind must not be empty")
 	}
+	if c.ManagementBind == "" {
+		return errors.New("config: management bind must not be empty")
+	}
 	switch c.LogLevel {
 	case "debug", "info", "warn", "error":
 	default:
 		return fmt.Errorf("config: invalid logLevel %q", c.LogLevel)
+	}
+	if c.ModelPoolMode != "" && c.ModelPoolMode != "Automatic" && c.ModelPoolMode != "Manual" {
+		return fmt.Errorf("config: invalid modelPoolMode %q", c.ModelPoolMode)
 	}
 	if c.PinnedModel != "" {
 		found := false

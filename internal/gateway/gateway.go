@@ -52,6 +52,7 @@ type Gateway struct {
 	benchmarkSnapshot scoring.Snapshot
 	benchmarkBindings map[model.ProviderModelID]matcher.BenchmarkBinding
 	usageSink         usage.Sink
+	pinnedModel       model.ProviderModelID
 }
 
 // SetUsageSink installs the append-only request usage sink. A nil sink

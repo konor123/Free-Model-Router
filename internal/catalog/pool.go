@@ -142,3 +142,23 @@ func (p *PoolState) ClearAll() {
 	p.Config.Revision++
 	p.tombstones = map[model.ProviderModelID]bool{}
 }
+
+// Replace atomically replaces the user-visible pool selection and mode. The
+// caller is responsible for optimistic revision checking in the owning store.
+// The selection is copied so callers cannot mutate pool state after the update.
+func (p *PoolState) Replace(selected []model.ProviderModelID, mode PoolMode) error {
+	if p == nil || p.Config == nil {
+		return fmt.Errorf("nil pool state")
+	}
+	if mode == "" {
+		mode = ModeAutomatic
+	}
+	if mode != ModeAutomatic && mode != ModeManual {
+		return fmt.Errorf("invalid pool mode %q", mode)
+	}
+	p.Config.SelectedProviderModelIDs = append([]model.ProviderModelID(nil), selected...)
+	p.Config.Mode = mode
+	p.Config.Revision++
+	p.tombstones = map[model.ProviderModelID]bool{}
+	return nil
+}

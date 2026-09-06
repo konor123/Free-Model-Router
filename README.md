@@ -74,3 +74,38 @@ latency, commit state, HTTP status, and provider-reported token counts, but neve
 retain prompts, responses, API keys, or Authorization headers. Durable logs are
 stored as protected JSONL below the user configuration directory and are bounded
 to 20 MB and 30 days.
+
+## Control API and CLI
+
+Phase 13 adds a separate, authenticated localhost control plane. Configured
+profiles listen on `127.0.0.1:8788` by default and expose:
+
+```text
+GET   /_fmr/status
+GET   /_fmr/providers
+GET   /_fmr/models
+GET   /_fmr/model-pool
+PUT   /_fmr/model-pool
+PATCH /_fmr/model-pool
+POST  /_fmr/pin
+POST  /_fmr/auto
+GET   /_fmr/logs
+```
+
+Every control request requires the local management bearer token. Model IDs
+remain JSON fields, and model-pool writes use an optimistic `revision` value.
+The status response includes `apiVersion`, `buildVersion`, `instanceId`, and
+`features` so desktop clients can attach only to a compatible API major.
+
+The dependency-free `fmr` client provides `start`, `stop`, `status`, `models`,
+`providers`, `model-pool`, `config`, `logs`, and `doctor` commands. Use
+`-token` for an explicit token or let the client resolve the configured secret.
+
+## Network security
+
+Phase 14 keeps inference on `127.0.0.1:8787` by default. To expose inference
+outside the host, set `FMR_BIND` explicitly to a non-loopback address such as
+`0.0.0.0:8787`; a separate `FMR_INFERENCE_TOKEN` is then required for bearer
+authentication. The management listener is always validated as loopback-only,
+regardless of the inference bind. Authentication tokens and other secrets are
+never written to application logs or control responses.

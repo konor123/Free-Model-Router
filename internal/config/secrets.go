@@ -13,6 +13,12 @@ import (
 const (
 	secretSchemaVersion = 1
 	maxSecretFileBytes  = 1 << 20
+
+	// ManagementTokenKey is the local bearer credential for /_fmr endpoints.
+	ManagementTokenKey = "FMR_MANAGEMENT_TOKEN"
+	// InferenceTokenKey is the bearer credential required when inference binds
+	// beyond loopback.
+	InferenceTokenKey = "FMR_INFERENCE_TOKEN"
 )
 
 var (

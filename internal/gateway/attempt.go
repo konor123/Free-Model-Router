@@ -351,6 +351,12 @@ func (g *Gateway) resolveAttemptCandidates(req chatCompletionRequest) []attemptC
 	if g.catalog == nil {
 		return nil
 	}
+	if isAutoModel(req.Model) && g.pinnedModel != "" {
+		// A pin is preferred, not a new route identity. The existing explicit
+		// candidate path keeps the pinned model authoritative while still
+		// allowing eligible pool routes to serve as conservative fallbacks.
+		req.Model = string(g.pinnedModel)
+	}
 
 	base := g.filterInputLocked(req)
 	var normal []router.Candidate
