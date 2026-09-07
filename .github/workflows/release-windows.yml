@@ -33,10 +33,6 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
-      - name: test native desktop shell
-        shell: pwsh
-        run: cargo test --manifest-path desktop\src-tauri\Cargo.toml
-
       - name: prepare bundled gateway and CLI
         shell: pwsh
         env:
@@ -47,6 +43,10 @@ jobs:
           go build -trimpath -ldflags $ldflags -o dist\windows\Free-Model-Router.exe ./cmd/Free-Model-Router
           go build -trimpath -ldflags $ldflags -o dist\windows\fmr.exe ./cmd/fmr
           go run ./cmd/fmr-package -binary dist\windows\Free-Model-Router.exe -metadata dist\windows\Free-Model-Router.exe.metadata.json -target x86_64-pc-windows-msvc -version $env:REF_NAME -api-version 1 -ownership desktop-managed
+
+      - name: test native desktop shell
+        shell: pwsh
+        run: cargo test --manifest-path desktop\src-tauri\Cargo.toml
 
       - name: build native Tauri desktop
         shell: pwsh
