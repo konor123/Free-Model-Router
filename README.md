@@ -1,174 +1,125 @@
 # Free-Model-Router
 
-Free Model Router (FMR): local AI gateway (Go) + Tauri desktop UI that discovers free / free-tier
-LLM providers and routes requests by capability, performance, TTFT, and health.
+Free Model Router(FMR)는 무료·무료 티어 LLM 프로바이더를 검색하고 기능·성능·TTFT·상태를
+기준으로 요청을 라우팅하는 로컬 AI 게이트웨이(Go)와 Tauri 데스크톱 앱입니다.
 
-Plan of record: [PLAN_V7.1.md](PLAN_V7.1.md).
+## 현황
 
-## Status
+Phase 0–6.5 런타임 통합, Phase 7 실패 인지형 폴백, Phase 8 스트리밍 커밋 가드,
+Phase 9 벤치마크·신뢰도 기반 점수, Phase 10 NVIDIA·Gemini·xAI 프로바이더,
+Phase 11 영속화·스키마 마이그레이션·OS 상태 디렉터리·SecretStore,
+Phase 12 요청별 사용량 로그, Phase 13 localhost 제어 API·`fmr` CLI,
+Phase 14 loopback 관리·LAN 추론 인증, Phase 15 데스크톱 수명주기,
+Phase 16 모델 필터·성능 메타데이터·라우팅 점수, Phase 17 마스킹된 실시간 사용량 이벤트,
+Phase 18 Windows 사이드카 메타데이터·매니페스트·Tauri 셸·NSIS/MSI·portable ZIP 빌드를
+구현했습니다. 클린 VM 설치·첫 실행·자동 시작·업그레이드·제거 검증은 별도 환경이 필요합니다.
 
-Phase 0–6.5 runtime integration complete.
-Phase 7 ranked, failure-aware fallback implemented.
-Phase 8 streaming commit guard validated.
-Phase 9 benchmark matching, confidence-aware scoring, and runtime ranking integrated.
-Phase 10 additional NVIDIA, Gemini, and xAI providers implemented.
-Phase 11 persistence, schema migration, OS state directories, and secret storage implemented.
-Phase 12 request-level usage logging with per-attempt fallback history, token metadata,
-and bounded durable retention implemented.
-Phase 13 localhost control API and `fmr` CLI implemented.
-Phase 14 loopback management and explicit LAN inference authentication implemented.
-Phase 15 desktop lifecycle core implemented, including single-instance leases,
-compatible attach/start ownership, provider menu state, and file-based autostart.
-Phase 16 model-manager filtering, route performance metadata, routing scores, and
-typed control-client mutations implemented.
-Phase 17 live redacted usage events, SSE delivery, and usage-window filters implemented.
-Phase 18 Windows sidecar metadata, package manifest, native Tauri shell, local
-NSIS/MSI bundle build, portable ZIP workflow, and separate packaging validation
-command implemented. Clean-VM installer, first-run, autostart, upgrade, and
-uninstall gates remain environment-dependent.
+## 데스크톱 앱
 
-## Layout
+앱은 보조 창 없이 하나의 메인 창에서 `Provider`, `Model`, `Usage log`, `Endpoint-key`
+탭을 제공합니다. OpenAI 호환 프로바이더를 설정하고 키를 OS SecretStore에 저장할 수
+있습니다. 모델을 다시 검색할 수 있으며 성능·지연 시간·라우팅 점수로 정렬할 수 있습니다.
+
+트레이 메뉴는 `Start with Windows`와 `Exit`로 단순화되었습니다. 트레이 아이콘을 왼쪽
+클릭하면 메인 창이 표시됩니다. 데스크톱이 관리하는 게이트웨이는 설정 변경 후 자동으로
+재시작되며, 외부에서 실행 중인 게이트웨이는 `restart required` 상태를 표시하고 수동
+재시작이 필요합니다.
+
+## 구조
 
 ```
 cmd/Free-Model-Router gateway binary entrypoint
 internal/app           wiring
-internal/model         core types (identity, failure)   [Phase 1+]
+internal/model         core types
 internal/provider      provider interfaces
-internal/providers     concrete provider implementations [Phase 2+]
-internal/router        eligibility + fallback           [Phase 4+]
-internal/gateway       OpenAI-compatible HTTP surface   [Phase 2+]
-internal/config        configuration + persistence + secrets [Phase 0+]
-internal/usage         redacted request/attempt usage log [Phase 12+]
-internal/control       authenticated desktop/CLI control API [Phase 13+]
-internal/security      bind and bearer-token policy [Phase 14+]
-internal/desktop       tray-shell lifecycle contracts [Phase 15+]
-internal/packaging     sidecar metadata and release manifest [Phase 18+]
-desktop/src-tauri      native Tauri tray and control shell [Phase 18+]
+internal/providers     concrete provider implementations
+internal/router        eligibility + fallback
+internal/gateway       OpenAI-compatible HTTP surface
+internal/config        configuration + persistence + secrets
+internal/usage         redacted request/attempt usage log
+internal/control       authenticated desktop/CLI control API
+internal/security      bind and bearer-token policy
+internal/desktop       tray-shell lifecycle contracts
+internal/packaging     sidecar metadata and release manifest
+desktop/src-tauri      native Tauri tray and control shell
 ```
 
-Dependency rule (see PLAN_V7 §4):
+의존성 규칙: `router`는 프로바이더 인터페이스에만 의존하며, 구체 프로바이더 구현에는
+의존하지 않습니다.
 
-```
-router → provider interfaces
-provider implementations → provider interfaces
-router ✕ provider implementations
-```
+## 빌드·검증
 
-## Build / gate
-
-```
+```powershell
 go test ./...
 go vet ./...
 go build ./cmd/Free-Model-Router
 ```
 
-## Failover limits
+## 폴백 제한
 
-The gateway bounds fallback per request. Defaults are four attempts and a
-30-second failover window. Override them with:
+요청별 폴백은 기본 4회, 30초로 제한됩니다.
 
+```powershell
+$env:FMR_MAX_ATTEMPTS="4"
+$env:FMR_FAILOVER_BUDGET_MS="30000"
 ```
-FMR_MAX_ATTEMPTS=4
-FMR_FAILOVER_BUDGET_MS=30000
-```
 
-## Persistence and secrets
+## 영속화와 보안 키
 
-Configuration is stored atomically as a versioned `PersistedConfig` below the
-OS user configuration directory. Cache state uses the corresponding OS user
-cache directory. Secret lookup is fail-closed and ordered as follows:
+설정은 OS 사용자 설정 디렉터리의 버전 있는 `PersistedConfig`로 원자적으로 저장되고,
+캐시는 OS 사용자 캐시 디렉터리를 사용합니다. 키 조회 순서는 다음과 같으며 실패 시
+안전하게 거부합니다.
 
-1. matching environment variable, such as `GEMINI_API_KEY`
-2. the native OS credential store
-3. a separate user-only `secrets.json` fallback file
+1. 일치하는 환경 변수(예: `GEMINI_API_KEY`)
+2. 운영체제 기본 자격 증명 저장소(SecretStore)
+3. 사용자만 읽을 수 있는 별도 `secrets.json` 폴백 파일
 
-Secret values are never included in configuration or usage logs.
+키 값은 설정이나 사용량 로그에 절대 포함되지 않습니다. 사용량 로그에는 경로 메타데이터,
+실패 분류, TTFT, 지연 시간, 커밋 상태, HTTP 상태, 토큰 수가 저장되지만 프롬프트·응답·
+API 키·Authorization 헤더는 저장되지 않습니다. 보호된 JSONL 로그는 20MB·30일로 제한됩니다.
 
-Usage logs contain one record per inference request and nested records for each
-fallback attempt. They retain route metadata, failure classification, TTFT,
-latency, commit state, HTTP status, and provider-reported token counts, but never
-retain prompts, responses, API keys, or Authorization headers. Durable logs are
-stored as protected JSONL below the user configuration directory and are bounded
-to 20 MB and 30 days.
+## 제어 API와 CLI
 
-## Control API and CLI
-
-Phase 13 adds a separate, authenticated localhost control plane. Configured
-profiles listen on `127.0.0.1:8788` by default and expose:
+인증된 localhost 제어면은 기본적으로 `127.0.0.1:8788`에서 수신합니다.
 
 ```text
-GET   /_fmr/status
-GET   /_fmr/providers
-GET   /_fmr/models
-GET   /_fmr/model-pool
-PUT   /_fmr/model-pool
-PATCH /_fmr/model-pool
-POST  /_fmr/pin
-POST  /_fmr/auto
-GET   /_fmr/logs
+GET   /_fmr/status       GET   /_fmr/providers   GET   /_fmr/models
+GET   /_fmr/model-pool   PUT   /_fmr/model-pool  PATCH /_fmr/model-pool
+POST  /_fmr/pin          POST  /_fmr/auto        GET   /_fmr/logs
+GET   /_fmr/config       PUT   /_fmr/config      POST  /_fmr/catalog/refresh
 ```
 
-Every control request requires the local management bearer token. Model IDs
-remain JSON fields, and model-pool writes use an optimistic `revision` value.
-The status response includes `apiVersion`, `buildVersion`, `instanceId`, and
-`features` so desktop clients can attach only to a compatible API major.
+모든 제어 요청에는 로컬 관리 bearer token이 필요합니다. `fmr` 클라이언트는 `start`,
+`stop`, `status`, `models`, `providers`, `model-pool`, `config`, `logs`, `doctor` 명령을
+제공하며, 명시적 토큰은 `-token`으로 전달할 수 있습니다.
 
-The dependency-free `fmr` client provides `start`, `stop`, `status`, `models`,
-`providers`, `model-pool`, `config`, `logs`, and `doctor` commands. Use
-`-token` for an explicit token or let the client resolve the configured secret.
+## 네트워크 보안
 
-## Network security
+추론은 기본적으로 `127.0.0.1:8787`에서만 동작합니다. 외부에 공개하려면 `FMR_BIND`를
+`0.0.0.0:8787` 같은 non-loopback 주소로 명시해야 하며, 별도의 `FMR_INFERENCE_TOKEN`
+bearer 인증이 필요합니다. 관리 리스너는 항상 loopback 전용입니다. 인증 토큰과 보안 키는
+애플리케이션 로그나 제어 응답에 기록되지 않습니다.
 
-Phase 14 keeps inference on `127.0.0.1:8787` by default. To expose inference
-outside the host, set `FMR_BIND` explicitly to a non-loopback address such as
-`0.0.0.0:8787`; a separate `FMR_INFERENCE_TOKEN` is then required for bearer
-authentication. The management listener is always validated as loopback-only,
-regardless of the inference bind. Authentication tokens and other secrets are
-never written to application logs or control responses.
+## Windows 패키징
 
-The desktop lifecycle core provides atomic profile leases, stale-owner recovery,
-API-major compatible attach decisions, explicit `desktop-managed` versus `external`
-ownership, and user-scoped file autostart. The native Tauri shell renders the tray,
-owns the single-instance focus callback, starts or attaches the Go sidecar, and
-opens the model-manager and usage-log windows. Node, npm, and Rust remain build-time
-requirements only.
-
-## Windows packaging
-
-The build-time `fmr-package` command generates and verifies deterministic
-sidecar metadata containing the target triple, binary/build version, API version
-and major, ownership mode, and SHA-256. It also writes a Windows manifest that
-distinguishes build-time Node/npm/Rust requirements from the end-user runtime,
-which requires none of those tools. The separate `fmr.exe` control CLI is
-included in the portable package.
-
-From Windows, run:
+최종 사용자 런타임에는 Node, npm, Rust, Go가 필요하지 않습니다. Windows에서 다음을 실행합니다.
 
 ```powershell
 .\scripts\package-windows.ps1 `
-  -Version v0.18.0 `
+  -Version v0.8.0 `
   -DesktopExecutable desktop\src-tauri\target\release\free-model-router-desktop.exe
 ```
 
-after:
+실행 전 네이티브 셸을 빌드합니다.
 
 ```powershell
 cargo build --manifest-path desktop\src-tauri\Cargo.toml --release
 ```
 
-The workflow performs that build and validates the resulting manifest. Clean-VM
-install, first-run, autostart, upgrade, and uninstall validation still require a
-separate Windows VM.
+워크플로는 사이드카 메타데이터와 매니페스트를 생성·검증합니다. 클린 VM 설치·첫 실행·
+자동 시작·업그레이드·제거 검증은 별도 Windows VM이 필요하며, 이 저장소에서는 해당 검증을
+수행했다고 주장하지 않습니다.
 
-The model-manager API exposes model and route performance fields including TTFT,
-latency score, benchmark performance, confidence, and routing score. The typed
-control client and `FilterModels` helper support search, provider, access, status,
-and capability filters without changing gateway state. Model-pool writes remain
-optimistic and return revision conflicts instead of silently overwriting another
-client's selection.
-
-Usage windows can poll `GET /_fmr/logs` with time, provider, model, result, and
-fallback filters, or subscribe to `GET /_fmr/logs/events` using the authenticated
-localhost SSE stream. Events contain request IDs, route metadata, and terminal
-results only. Prompts, responses, authorization headers, and secrets have no
-representation in the stream.
+모델 관리자 API는 TTFT, 지연 시간 점수, 벤치마크 성능, 신뢰도, 라우팅 점수를 제공합니다.
+사용량 로그는 `GET /_fmr/logs` 조회 또는 인증된 `GET /_fmr/logs/events` SSE 구독으로
+확인할 수 있습니다. 스트림에도 프롬프트·응답·Authorization 헤더·보안 키는 나타나지 않습니다.
