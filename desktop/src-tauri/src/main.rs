@@ -6,16 +6,19 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::menu::{MenuBuilder, MenuItemBuilder};
-use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 
 const API_VERSION: &str = "1";
 const DEFAULT_GATEWAY_ADDRESS: &str = "127.0.0.1:8788";
@@ -98,12 +101,14 @@ impl Default for RuntimeState {
 
 struct AppState {
     runtime: Mutex<RuntimeState>,
+    usage_streaming: AtomicBool,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
             runtime: Mutex::new(RuntimeState::default()),
+            usage_streaming: AtomicBool::new(false),
         }
     }
 }
@@ -195,6 +200,9 @@ fn http_json(
     path: &str,
     body: Option<&Value>,
 ) -> Result<Value, String> {
+    if !valid_control_token(token) {
+        return Err("gateway control token contains invalid control characters".to_string());
+    }
     let address = normalize_address(address)?;
     let endpoint = address
         .to_socket_addrs()
@@ -246,11 +254,71 @@ fn http_json(
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|value| value.parse::<u16>().ok())
         .ok_or_else(|| "gateway response had no HTTP status".to_string())?;
-    let body = &response[separator + 4..];
+    let body = decode_http_body(&headers, &response[separator + 4..])?;
     if !(200..300).contains(&status) {
         return Err(format!("gateway returned HTTP {status}"));
     }
-    serde_json::from_slice(body).map_err(|error| format!("decode gateway response: {error}"))
+    serde_json::from_slice(&body).map_err(|error| format!("decode gateway response: {error}"))
+}
+
+fn decode_http_body(headers: &str, body: &[u8]) -> Result<Vec<u8>, String> {
+    let transfer_encodings: Vec<&str> = headers
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(name, _)| name.trim().eq_ignore_ascii_case("transfer-encoding"))
+        .flat_map(|(_, value)| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect();
+    if transfer_encodings.is_empty() {
+        return Ok(body.to_vec());
+    }
+    if transfer_encodings.len() != 1 || !transfer_encodings[0].eq_ignore_ascii_case("chunked") {
+        return Err("gateway response uses unsupported transfer encoding".to_string());
+    }
+    decode_chunked_body(body)
+}
+
+fn decode_chunked_body(mut body: &[u8]) -> Result<Vec<u8>, String> {
+    let mut decoded = Vec::new();
+    loop {
+        let line_end = body
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .ok_or_else(|| "gateway chunk size is truncated".to_string())?;
+        let size_bytes = body[..line_end]
+            .split(|byte| *byte == b';')
+            .next()
+            .unwrap_or_default();
+        if size_bytes.is_empty() || !size_bytes.iter().all(u8::is_ascii_hexdigit) {
+            return Err("gateway chunk size is invalid".to_string());
+        }
+        let size_text = std::str::from_utf8(size_bytes)
+            .map_err(|_| "gateway chunk size is invalid".to_string())?;
+        let size = usize::from_str_radix(size_text, 16)
+            .map_err(|_| "gateway chunk size is invalid".to_string())?;
+        body = &body[line_end + 2..];
+        if size == 0 {
+            loop {
+                let trailer_end = body
+                    .windows(2)
+                    .position(|window| window == b"\r\n")
+                    .ok_or_else(|| "gateway chunk trailers are truncated".to_string())?;
+                if trailer_end == 0 {
+                    return Ok(decoded);
+                }
+                body = &body[trailer_end + 2..];
+            }
+        }
+        let framed_length = size
+            .checked_add(2)
+            .ok_or_else(|| "gateway chunk size is invalid".to_string())?;
+        if body.len() < framed_length || &body[size..framed_length] != b"\r\n" {
+            return Err("gateway chunk data is truncated or malformed".to_string());
+        }
+        decoded.extend_from_slice(&body[..size]);
+        body = &body[framed_length..];
+    }
 }
 
 fn sidecar_path() -> Result<PathBuf, String> {
@@ -440,10 +508,131 @@ fn current_connection(state: &AppState) -> Result<(String, String), String> {
             .clone()
             .unwrap_or_else(|| "gateway is not connected".to_string()));
     }
+    if !valid_control_token(&runtime.token) {
+        return Err("gateway control token contains invalid control characters".to_string());
+    }
     Ok((runtime.address.clone(), runtime.token.clone()))
 }
 
+fn valid_control_token(token: &str) -> bool {
+    !token.chars().any(|character| character.is_control())
+}
+
+fn control_request(
+    state: &AppState,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+) -> Result<Value, String> {
+    let (address, token) = current_connection(state)?;
+    http_json(&address, &token, method, path, body)
+}
+
+fn sse_payload(line: &str) -> Option<Value> {
+    line.strip_prefix("data: ")
+        .and_then(|payload| serde_json::from_str(payload.trim()).ok())
+}
+
+fn stream_usage_events(app: &AppHandle, address: &str, token: &str) -> Result<(), String> {
+    let address = normalize_address(address)?;
+    let endpoint = address
+        .to_socket_addrs()
+        .map_err(|error| format!("resolve usage event stream: {error}"))?
+        .next()
+        .ok_or_else(|| "usage event stream has no socket endpoint".to_string())?;
+    let mut stream = TcpStream::connect_timeout(&endpoint, Duration::from_secs(2))
+        .map_err(|error| format!("connect usage event stream: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .map_err(|error| format!("configure usage event stream read timeout: {error}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| format!("configure usage event stream: {error}"))?;
+    let request = format!(
+        "GET /_fmr/logs/events HTTP/1.0\r\nHost: {address}\r\nAuthorization: Bearer {}\r\nAccept: text/event-stream\r\n\r\n",
+        token.trim()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("send usage event stream request: {error}"))?;
+
+    let mut reader = BufReader::new(stream);
+    let mut status = String::new();
+    reader
+        .read_line(&mut status)
+        .map_err(|error| format!("read usage event stream status: {error}"))?;
+    if !status.contains(" 200 ") {
+        return Err(format!("usage event stream returned {}", status.trim()));
+    }
+    loop {
+        let mut line = String::new();
+        if reader
+            .read_line(&mut line)
+            .map_err(|error| format!("read usage event stream headers: {error}"))?
+            == 0
+        {
+            return Err("usage event stream ended before headers".to_string());
+        }
+        if line == "\r\n" {
+            break;
+        }
+    }
+    loop {
+        let mut line = String::new();
+        if reader
+            .read_line(&mut line)
+            .map_err(|error| format!("read usage event: {error}"))?
+            == 0
+        {
+            return Ok(());
+        }
+        if let Some(payload) = sse_payload(&line) {
+            let successful_model = payload.get("record").and_then(|record| {
+                if record.get("result").and_then(Value::as_str) == Some("success") {
+                    record.get("finalModel").and_then(Value::as_str)
+                } else {
+                    None
+                }
+            });
+            if let Some(model) = successful_model {
+                if let Some(tray) = app.tray_by_id("main-tray") {
+                    let _ = tray.set_tooltip(Some(format!("Free-Model-Router · {model}")));
+                }
+            }
+            app.emit("usage-event", payload)
+                .map_err(|error| format!("emit usage event: {error}"))?;
+        }
+    }
+}
+
+#[tauri::command]
+fn start_usage_stream(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let (address, token) = current_connection(&state)?;
+    if state.usage_streaming.swap(true, Ordering::AcqRel) {
+        return Ok(());
+    }
+    let handle = app.clone();
+    thread::spawn(move || {
+        while handle
+            .state::<AppState>()
+            .usage_streaming
+            .load(Ordering::Acquire)
+        {
+            let _ = stream_usage_events(&handle, &address, &token);
+            if handle
+                .state::<AppState>()
+                .usage_streaming
+                .load(Ordering::Acquire)
+            {
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+    });
+    Ok(())
+}
+
 fn stop_managed(state: &AppState) -> Result<(), String> {
+    state.usage_streaming.store(false, Ordering::Release);
     let mut runtime = state
         .runtime
         .lock()
@@ -459,30 +648,6 @@ fn stop_managed(state: &AppState) -> Result<(), String> {
     runtime.status = None;
     runtime.error = None;
     Ok(())
-}
-
-fn open_auxiliary_window(
-    app: &AppHandle,
-    label: &str,
-    title: &str,
-    view: &str,
-) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window(label) {
-        window.show().map_err(|error| error.to_string())?;
-        window.set_focus().map_err(|error| error.to_string())?;
-        return Ok(());
-    }
-    WebviewWindowBuilder::new(
-        app,
-        label,
-        WebviewUrl::App(format!("index.html?view={view}").into()),
-    )
-    .title(title)
-    .inner_size(980.0, 680.0)
-    .min_inner_size(640.0, 420.0)
-    .build()
-    .map(|_| ())
-    .map_err(|error| error.to_string())
 }
 
 fn autostart_path() -> Result<PathBuf, String> {
@@ -530,48 +695,78 @@ fn attach_or_start(
 
 #[tauri::command]
 fn gateway_providers(state: State<'_, AppState>) -> Result<Value, String> {
-    let (address, token) = current_connection(&state)?;
-    http_json(&address, &token, "GET", "/_fmr/providers", None)
+    control_request(&state, "GET", "/_fmr/providers", None)
 }
 
 #[tauri::command]
 fn gateway_models(state: State<'_, AppState>) -> Result<Value, String> {
-    let (address, token) = current_connection(&state)?;
-    http_json(&address, &token, "GET", "/_fmr/models", None)
+    control_request(&state, "GET", "/_fmr/models", None)
 }
 
 #[tauri::command]
-fn gateway_pool(state: State<'_, AppState>) -> Result<Value, String> {
-    let (address, token) = current_connection(&state)?;
-    http_json(&address, &token, "GET", "/_fmr/model-pool", None)
-}
-
-#[tauri::command]
-fn patch_model_pool(state: State<'_, AppState>, request: Value) -> Result<Value, String> {
-    let (address, token) = current_connection(&state)?;
-    http_json(
-        &address,
-        &token,
-        "PATCH",
-        "/_fmr/model-pool",
-        Some(&request),
+fn refresh_gateway_catalog(state: State<'_, AppState>) -> Result<Value, String> {
+    control_request(
+        &state,
+        "POST",
+        "/_fmr/catalog/refresh",
+        Some(&serde_json::json!({})),
     )
 }
 
 #[tauri::command]
+fn gateway_pool(state: State<'_, AppState>) -> Result<Value, String> {
+    control_request(&state, "GET", "/_fmr/model-pool", None)
+}
+
+#[tauri::command]
+fn patch_model_pool(state: State<'_, AppState>, request: Value) -> Result<Value, String> {
+    control_request(&state, "PATCH", "/_fmr/model-pool", Some(&request))
+}
+
+#[tauri::command]
+fn replace_model_pool(state: State<'_, AppState>, request: Value) -> Result<Value, String> {
+    control_request(&state, "PUT", "/_fmr/model-pool", Some(&request))
+}
+
+#[tauri::command]
+fn pin_model(state: State<'_, AppState>, request: Value) -> Result<Value, String> {
+    control_request(&state, "POST", "/_fmr/pin", Some(&request))
+}
+
+#[tauri::command]
+fn auto_select(state: State<'_, AppState>, request: Value) -> Result<Value, String> {
+    control_request(&state, "POST", "/_fmr/auto", Some(&request))
+}
+
+#[tauri::command]
+fn gateway_config(state: State<'_, AppState>) -> Result<Value, String> {
+    control_request(&state, "GET", "/_fmr/config", None)
+}
+
+#[tauri::command]
+fn update_gateway_config(state: State<'_, AppState>, request: Value) -> Result<Value, String> {
+    let managed = {
+        let runtime = state
+            .runtime
+            .lock()
+            .map_err(|_| "desktop runtime lock is poisoned".to_string())?;
+        runtime.ownership == Ownership::DesktopManaged
+    };
+    let mut response = control_request(&state, "PUT", "/_fmr/config", Some(&request))?;
+    if managed {
+        stop_managed(&state)?;
+        attach_or_start_internal(&state, None)?;
+        if let Some(object) = response.as_object_mut() {
+            object.insert("restarted".to_string(), Value::Bool(true));
+            object.insert("restartRequired".to_string(), Value::Bool(false));
+        }
+    }
+    Ok(response)
+}
+
+#[tauri::command]
 fn gateway_logs(state: State<'_, AppState>) -> Result<Value, String> {
-    let (address, token) = current_connection(&state)?;
-    http_json(&address, &token, "GET", "/_fmr/logs?limit=100", None)
-}
-
-#[tauri::command]
-fn open_model_manager(app: AppHandle) -> Result<(), String> {
-    open_auxiliary_window(&app, "model-manager", "Model Manager", "models")
-}
-
-#[tauri::command]
-fn open_usage_log(app: AppHandle) -> Result<(), String> {
-    open_auxiliary_window(&app, "usage-log", "Usage Log", "logs")
+    control_request(&state, "GET", "/_fmr/logs?limit=100", None)
 }
 
 #[tauri::command]
@@ -595,29 +790,39 @@ fn shutdown(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
 }
 
 fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    let show = MenuItemBuilder::with_id("show", "Show").build(app)?;
-    let models = MenuItemBuilder::with_id("models", "Model Manager").build(app)?;
-    let logs = MenuItemBuilder::with_id("logs", "Usage Log").build(app)?;
-    let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
-    let menu = MenuBuilder::new(app)
-        .items(&[&show, &models, &logs, &quit])
-        .build()?;
-    let mut tray = TrayIconBuilder::new().menu(&menu);
+    let autostart = CheckMenuItemBuilder::with_id("autostart", "Start with Windows")
+        .checked(autostart_path().map(|path| path.exists()).unwrap_or(false))
+        .build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", "Exit").build(app)?;
+    let menu = MenuBuilder::new(app).items(&[&autostart, &quit]).build()?;
+    let mut tray = TrayIconBuilder::with_id("main-tray")
+        .menu(&menu)
+        .tooltip("Free-Model-Router");
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
     }
-    tray.on_menu_event(|app, event| match event.id.as_ref() {
-        "show" => {
+    let autostart_item = autostart.clone();
+    tray = tray.on_tray_icon_event(|tray, event| {
+        if let TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        } = event
+        {
+            let app = tray.app_handle();
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.set_focus();
             }
         }
-        "models" => {
-            let _ = open_auxiliary_window(app, "model-manager", "Model Manager", "models");
-        }
-        "logs" => {
-            let _ = open_auxiliary_window(app, "usage-log", "Usage Log", "logs");
+    });
+    tray.on_menu_event(move |app, event| match event.id.as_ref() {
+        "autostart" => {
+            if let Ok(checked) = autostart_item.is_checked() {
+                if set_autostart(checked).is_err() {
+                    let _ = autostart_item.set_checked(!checked);
+                }
+            }
         }
         "quit" => {
             let state = app.state::<AppState>();
@@ -654,11 +859,16 @@ fn main() {
             attach_or_start,
             gateway_providers,
             gateway_models,
+            refresh_gateway_catalog,
             gateway_pool,
             patch_model_pool,
+            replace_model_pool,
+            pin_model,
+            auto_select,
+            gateway_config,
+            update_gateway_config,
             gateway_logs,
-            open_model_manager,
-            open_usage_log,
+            start_usage_stream,
             set_autostart,
             shutdown
         ])
@@ -677,6 +887,38 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn read_test_request(stream: &mut TcpStream) -> (String, Vec<u8>) {
+        use std::io::{BufRead, BufReader};
+
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut headers = String::new();
+        let mut content_length = None;
+        loop {
+            let mut line = String::new();
+            assert_ne!(
+                reader.read_line(&mut line).unwrap(),
+                0,
+                "EOF before complete request headers"
+            );
+            headers.push_str(&line);
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("Content-Length") {
+                    assert!(content_length.is_none(), "duplicate Content-Length");
+                    content_length = Some(value.trim().parse::<usize>().unwrap());
+                }
+            }
+        }
+        let mut body = vec![0; content_length.expect("mutation must send Content-Length")];
+        reader.read_exact(&mut body).unwrap();
+        (headers, body)
+    }
 
     #[test]
     fn compatible_api_majors_attach() {
@@ -740,5 +982,84 @@ mod tests {
         assert!(content.contains("@echo off"));
         assert!(content.contains("free-model-router-desktop.exe"));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn control_request_forwards_authenticated_mutations() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (headers, body) = read_test_request(&mut stream);
+            assert!(headers.starts_with("POST /_fmr/pin HTTP/1.1"));
+            assert!(headers.contains("Authorization: Bearer test-token"));
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["providerModelId"], "opencode/model");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\n{\"revision\":2}")
+                .unwrap();
+        });
+        let state = AppState::default();
+        {
+            let mut runtime = state.runtime.lock().unwrap();
+            runtime.address = address.to_string();
+            runtime.token = "test-token".to_string();
+            runtime.status = Some(GatewayStatus::default());
+        }
+        let request = serde_json::json!({"revision": 1, "providerModelId": "opencode/model"});
+        let response = control_request(&state, "POST", "/_fmr/pin", Some(&request)).unwrap();
+        assert_eq!(response["revision"], 2);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn sse_payload_parses_only_data_lines() {
+        assert_eq!(
+            sse_payload("data: {\"type\":\"request_completed\"}\n"),
+            Some(serde_json::json!({ "type": "request_completed" }))
+        );
+        assert_eq!(sse_payload("event: request_completed\n"), None);
+    }
+
+    #[test]
+    fn control_tokens_reject_header_injection_characters() {
+        assert!(valid_control_token("safe-token"));
+        assert!(!valid_control_token("bad\r\nInjected: value"));
+    }
+
+    #[test]
+    fn http_json_rejects_invalid_control_tokens_before_connecting() {
+        let error = http_json(
+            "127.0.0.1:1",
+            "bad\r\nInjected: value",
+            "GET",
+            "/_fmr/status",
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "gateway control token contains invalid control characters"
+        );
+    }
+
+    #[test]
+    fn chunked_gateway_responses_are_decoded_before_json_parsing() {
+        let headers = "HTTP/1.1 200 OK\r\ntRaNsFeR-EnCoDiNg: ChUnKeD\r\n";
+        let body = b"4;source=test\r\n{\"a\"\r\n3\r\n:1}\r\n0\r\nX-Test: yes\r\n\r\n";
+        assert_eq!(decode_http_body(headers, body).unwrap(), br#"{"a":1}"#);
+    }
+
+    #[test]
+    fn malformed_or_unsupported_gateway_framing_is_rejected() {
+        assert!(decode_chunked_body(b"5\r\nabc").is_err());
+        assert!(decode_chunked_body(b"0\r\n").is_err());
+        assert!(decode_http_body(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n",
+            b"0\r\n\r\n"
+        )
+        .is_err());
     }
 }
