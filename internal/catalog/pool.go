@@ -80,6 +80,18 @@ type PoolState struct {
 	tombstones map[model.ProviderModelID]bool
 }
 
+// Clone returns an independent pool state including runtime tombstones.
+func (p *PoolState) Clone() *PoolState {
+	if p == nil {
+		return NewPoolState(nil)
+	}
+	out := NewPoolState(p.Config.Clone())
+	for id, value := range p.tombstones {
+		out.tombstones[id] = value
+	}
+	return out
+}
+
 // NewPoolState builds a pool state from a config.
 func NewPoolState(cfg *ModelPoolConfig) *PoolState {
 	if cfg == nil {

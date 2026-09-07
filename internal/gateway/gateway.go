@@ -144,27 +144,52 @@ func NewGatewayWithPolicy(ctx context.Context, p provider.Provider, policy Failo
 
 // RefreshCatalog re-discovers models and repicks fmr/auto target.
 func (g *Gateway) RefreshCatalog(ctx context.Context) error {
-	snap, err := g.Prov.DiscoverModels(ctx)
-	if err != nil {
-		return err
+	var (
+		snap   *model.CatalogSnapshot
+		routes map[model.ProviderModelID][]model.ProviderRoute
+		err    error
+	)
+	if routed, ok := g.Prov.(provider.RoutedCatalogProvider); ok {
+		catalog, discoverErr := routed.DiscoverRoutedCatalog(ctx)
+		if discoverErr != nil {
+			return discoverErr
+		}
+		if catalog == nil || catalog.Snapshot == nil {
+			return errors.New("routed provider returned an empty catalog")
+		}
+		snap, routes = catalog.Snapshot, catalog.Routes
+	} else {
+		snap, err = g.Prov.DiscoverModels(ctx)
+		if err != nil {
+			return err
+		}
+		if snap == nil {
+			return errors.New("provider returned an empty catalog")
+		}
+		routes = make(map[model.ProviderModelID][]model.ProviderRoute, len(snap.Models))
+		for id, pm := range snap.Models {
+			routes[id] = opencode.Routes(id, pm.UpstreamID, pm.Base)
+		}
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if err := snap.Validate(); err != nil {
+		return fmt.Errorf("catalog snapshot: %w", err)
+	}
+	if len(snap.Models) == 0 {
+		return errors.New("catalog empty: no routable models")
+	}
+	candidatePool := g.pool.StateSnapshot()
+	var reconcileErr error
+	_, reconcileErr = g.reconciler.Reconcile(candidatePool, snap, routes)
+	if reconcileErr != nil {
+		return reconcileErr
+	}
 	snap, err = g.pool.CommitSnapshot(snap)
 	if err != nil {
 		return err
 	}
-	routes := make(map[model.ProviderModelID][]model.ProviderRoute, len(snap.Models))
-	for id, pm := range snap.Models {
-		routes[id] = opencode.Routes(id, pm.UpstreamID, pm.Base)
-	}
-	var reconcileErr error
-	g.pool.Mutate(func(pool *catalog.PoolState) {
-		_, reconcileErr = g.reconciler.Reconcile(pool, snap, routes)
-	})
-	if reconcileErr != nil {
-		return reconcileErr
-	}
+	g.pool.ReplaceState(candidatePool)
 	g.catalog, g.routes = snap, routes
 	g.rebuildBenchmarkBindingsLocked()
 	g.autoPick, g.autoRoute = "", model.ProviderRoute{}
@@ -178,9 +203,6 @@ func (g *Gateway) RefreshCatalog(ctx context.Context) error {
 		if candidates := routes[g.autoPick]; len(candidates) > 0 {
 			g.autoRoute = candidates[0]
 		}
-	}
-	if g.autoPick == "" {
-		return errors.New("catalog empty: no routable models")
 	}
 	return nil
 }

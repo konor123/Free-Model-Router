@@ -64,6 +64,21 @@ type Provider interface {
 	ChatProvider
 }
 
+// RoutedCatalog binds discovery output to the concrete routes that may execute
+// it. Providers that aggregate multiple upstreams implement
+// RoutedCatalogProvider so the gateway never assumes OpenCode route semantics.
+type RoutedCatalog struct {
+	Snapshot *model.CatalogSnapshot
+	Routes   map[model.ProviderModelID][]model.ProviderRoute
+}
+
+// RoutedCatalogProvider is an optional extension for provider dispatchers.
+// Gateway keeps the CatalogProvider fallback for existing single-provider
+// implementations and embedders.
+type RoutedCatalogProvider interface {
+	DiscoverRoutedCatalog(ctx context.Context) (*RoutedCatalog, error)
+}
+
 // NormalizedRequest is the provider-agnostic chat request.
 type NormalizedRequest struct {
 	Messages       []Message            `json:"messages"`

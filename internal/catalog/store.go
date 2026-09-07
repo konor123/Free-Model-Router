@@ -67,6 +67,23 @@ func (s *Store) Snapshot() *ModelPoolConfig {
 	return s.pool.Config.Clone()
 }
 
+// StateSnapshot returns a defensive copy for staging reconciliation.
+func (s *Store) StateSnapshot() *PoolState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.pool.Clone()
+}
+
+// ReplaceState publishes a previously staged pool state.
+func (s *Store) ReplaceState(pool *PoolState) {
+	if pool == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pool = pool.Clone()
+}
+
 // Mutate applies a mutation callback under the write lock.
 // The callback receives the live pool state and must not retain it.
 func (s *Store) Mutate(fn func(p *PoolState)) {
