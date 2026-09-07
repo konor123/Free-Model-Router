@@ -144,6 +144,33 @@ func TestModelsListContainsAutoAndDiscovered(t *testing.T) {
 	}
 }
 
+func TestRefreshCatalogSelectsLexicographicallyFirstModelForAuto(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"zeta"},{"id":"alpha"}]}`))
+	}))
+	defer backend.Close()
+
+	g, err := NewGateway(context.Background(), fakeProvider{base: backend.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := model.NewProviderModelID("opencode", "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.autoPick != want {
+		t.Fatalf("auto model = %q, want %q", g.autoPick, want)
+	}
+	for i := 0; i < 10; i++ {
+		if err := g.RefreshCatalog(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if g.autoPick != want {
+			t.Fatalf("refresh %d auto model = %q, want %q", i, g.autoPick, want)
+		}
+	}
+}
+
 func TestChatCompletionEndToEndNonStreaming(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/models" {

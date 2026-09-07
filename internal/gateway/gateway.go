@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -167,12 +168,16 @@ func (g *Gateway) RefreshCatalog(ctx context.Context) error {
 	g.catalog, g.routes = snap, routes
 	g.rebuildBenchmarkBindingsLocked()
 	g.autoPick, g.autoRoute = "", model.ProviderRoute{}
+	ids := make([]model.ProviderModelID, 0, len(snap.Models))
 	for id := range snap.Models {
-		g.autoPick = id
-		if candidates := routes[id]; len(candidates) > 0 {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	if len(ids) > 0 {
+		g.autoPick = ids[0]
+		if candidates := routes[g.autoPick]; len(candidates) > 0 {
 			g.autoRoute = candidates[0]
 		}
-		break // Phase 2: single auto pick
 	}
 	if g.autoPick == "" {
 		return errors.New("catalog empty: no routable models")
