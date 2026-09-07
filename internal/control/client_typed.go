@@ -30,6 +30,18 @@ type ModelPoolPatchRequest = poolPatchRequest
 type PinRequest = pinRequest
 type RevisionRequest = revisionRequest
 
+func (c *Client) Config(ctx context.Context) (ConfigResponse, error) {
+	var response ConfigResponse
+	err := c.getJSON(ctx, "/_fmr/config", &response)
+	return response, err
+}
+
+func (c *Client) UpdateConfig(ctx context.Context, request ConfigUpdateRequest) (ConfigUpdateResponse, error) {
+	var response ConfigUpdateResponse
+	err := c.doJSON(ctx, "PUT", "/_fmr/config", request, &response)
+	return response, err
+}
+
 func (c *Client) Status(ctx context.Context) (StatusResponse, error) {
 	var response StatusResponse
 	err := c.getJSON(ctx, "/_fmr/status", &response)
@@ -46,6 +58,13 @@ func (c *Client) Models(ctx context.Context) (ModelsResponse, error) {
 	var response ModelsResponse
 	err := c.getJSON(ctx, "/_fmr/models", &response)
 	return response, err
+}
+
+func (c *Client) RefreshCatalog(ctx context.Context) error {
+	var response struct {
+		Status string `json:"status"`
+	}
+	return c.doJSON(ctx, "POST", "/_fmr/catalog/refresh", struct{}{}, &response)
 }
 
 func (c *Client) ModelPool(ctx context.Context) (PoolResponse, error) {

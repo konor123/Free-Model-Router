@@ -18,7 +18,6 @@ import (
 	"github.com/konor123/Free-Model-Router/internal/logging"
 	"github.com/konor123/Free-Model-Router/internal/model"
 	"github.com/konor123/Free-Model-Router/internal/provider"
-	"github.com/konor123/Free-Model-Router/internal/providers/opencode"
 	"github.com/konor123/Free-Model-Router/internal/security"
 	"github.com/konor123/Free-Model-Router/internal/usage"
 )
@@ -50,7 +49,11 @@ func NewLogger(cfg *config.Config) (*logging.Logger, error) {
 
 // Run boots the gateway HTTP server and blocks until ctx is canceled.
 func Run(ctx context.Context, cfg *config.Config, log *logging.Logger) error {
-	return RunWithProvider(ctx, cfg, log, opencode.New(""))
+	prov, err := configuredProvider(cfg, config.NewSecretStore())
+	if err != nil {
+		return err
+	}
+	return RunWithProvider(ctx, cfg, log, prov)
 }
 
 // RunWithProvider boots the same application wiring as Run with an injected
@@ -126,7 +129,12 @@ func RunWithProvider(ctx context.Context, cfg *config.Config, log *logging.Logge
 			Config: func() control.ConfigResponse {
 				configMu.RLock()
 				defer configMu.RUnlock()
-				return configView(cfg)
+				return configView(cfg, secretStore)
+			},
+			UpdateConfig: func(request control.ConfigUpdateRequest) (control.ConfigUpdateResponse, error) {
+				configMu.Lock()
+				defer configMu.Unlock()
+				return updateConfig(cfg, secretStore, request)
 			},
 			OnChange: func(snapshot gateway.ControlSnapshot) error {
 				configMu.Lock()
@@ -263,13 +271,22 @@ func persistControlState(cfg *config.Config, snapshot gateway.ControlSnapshot) e
 	return config.Save(cfg.SourcePath, cfg)
 }
 
-func configView(cfg *config.Config) control.ConfigResponse {
+func configView(cfg *config.Config, secrets *config.SecretStore) control.ConfigResponse {
 	if cfg == nil {
 		return control.ConfigResponse{}
 	}
-	return control.ConfigResponse{
+	response := control.ConfigResponse{
 		Bind: cfg.Bind, ManagementBind: cfg.ManagementBind, LogLevel: cfg.LogLevel,
 		ModelPool: append([]string(nil), cfg.ModelPool...), ModelPoolMode: cfg.ModelPoolMode,
-		PinnedModel: cfg.PinnedModel,
+		PinnedModel: cfg.PinnedModel, Revision: cfg.ConfigRevision,
 	}
+	for _, item := range cfg.Providers {
+		response.Providers = append(response.Providers, control.ProviderConfigResponse{ID: item.ID, Name: item.Name, Protocol: item.Protocol, BaseURL: item.BaseURL, Enabled: item.Enabled, HasCredential: item.CredentialRef != ""})
+	}
+	if secrets != nil {
+		if key, err := secrets.Get(config.InferenceTokenKey); err == nil && strings.TrimSpace(key) != "" {
+			response.InferenceKeyConfigured = true
+		}
+	}
+	return response
 }

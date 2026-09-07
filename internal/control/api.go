@@ -24,8 +24,9 @@ const (
 )
 
 var (
-	ErrBackendRequired = errors.New("control backend is required")
-	ErrTokenRequired   = errors.New("management token is required")
+	ErrBackendRequired        = errors.New("control backend is required")
+	ErrTokenRequired          = errors.New("management token is required")
+	ErrConfigRevisionConflict = errors.New("config revision conflict")
 )
 
 // Backend is the narrow gateway state and mutation boundary used by Server.
@@ -59,6 +60,7 @@ type Options struct {
 	Logs         LogReader
 	Events       EventSubscriber
 	Config       func() ConfigResponse
+	UpdateConfig func(ConfigUpdateRequest) (ConfigUpdateResponse, error)
 	OnChange     func(gateway.ControlSnapshot) error
 	Stop         func()
 }
@@ -135,12 +137,53 @@ type PoolResponse struct {
 
 // ConfigResponse is deliberately non-secret and safe for CLI/UI display.
 type ConfigResponse struct {
-	Bind           string   `json:"bind"`
-	ManagementBind string   `json:"managementBind"`
-	LogLevel       string   `json:"logLevel"`
-	ModelPool      []string `json:"modelPool,omitempty"`
-	ModelPoolMode  string   `json:"modelPoolMode,omitempty"`
-	PinnedModel    string   `json:"pinnedModel,omitempty"`
+	Bind                   string                   `json:"bind"`
+	ManagementBind         string                   `json:"managementBind"`
+	LogLevel               string                   `json:"logLevel"`
+	ModelPool              []string                 `json:"modelPool,omitempty"`
+	ModelPoolMode          string                   `json:"modelPoolMode,omitempty"`
+	PinnedModel            string                   `json:"pinnedModel,omitempty"`
+	Revision               int64                    `json:"revision"`
+	Providers              []ProviderConfigResponse `json:"providers,omitempty"`
+	InferenceKeyConfigured bool                     `json:"inferenceKeyConfigured"`
+}
+
+// ProviderConfigResponse is safe for display and never includes a credential
+// value or its backing SecretStore reference.
+type ProviderConfigResponse struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Protocol      string `json:"protocol"`
+	BaseURL       string `json:"baseUrl"`
+	Enabled       bool   `json:"enabled"`
+	HasCredential bool   `json:"hasCredential"`
+}
+
+// ProviderConfigUpdate carries desired provider state. APIKey is write-only:
+// nil keeps the current key, empty clears it, and a value replaces it.
+type ProviderConfigUpdate struct {
+	ID       string  `json:"id"`
+	Name     string  `json:"name"`
+	Protocol string  `json:"protocol"`
+	BaseURL  string  `json:"baseUrl"`
+	Enabled  bool    `json:"enabled"`
+	APIKey   *string `json:"apiKey,omitempty"`
+}
+
+// ConfigUpdateRequest replaces desktop-editable settings optimistically.
+type ConfigUpdateRequest struct {
+	Revision             int64                  `json:"revision"`
+	Bind                 string                 `json:"bind"`
+	Providers            []ProviderConfigUpdate `json:"providers"`
+	InferenceKey         *string                `json:"inferenceKey,omitempty"`
+	GenerateInferenceKey bool                   `json:"generateInferenceKey,omitempty"`
+}
+
+type ConfigUpdateResponse struct {
+	Config                   ConfigResponse `json:"config"`
+	RestartRequired          bool           `json:"restartRequired"`
+	CredentialCleanupPending bool           `json:"credentialCleanupPending,omitempty"`
+	GeneratedInferenceKey    string         `json:"generatedInferenceKey,omitempty"`
 }
 
 // Status returns the configured API/build handshake without making a request.

@@ -1,6 +1,7 @@
 package control
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,6 +51,7 @@ func NewServer(backend Backend, opts Options) (*Server, error) {
 	s.mux.HandleFunc("GET /_fmr/status", s.handleStatus)
 	s.mux.HandleFunc("GET /_fmr/providers", s.handleProviders)
 	s.mux.HandleFunc("GET /_fmr/models", s.handleModels)
+	s.mux.HandleFunc("POST /_fmr/catalog/refresh", s.handleCatalogRefresh)
 	s.mux.HandleFunc("GET /_fmr/model-pool", s.handlePool)
 	s.mux.HandleFunc("PUT /_fmr/model-pool", s.handlePoolPut)
 	s.mux.HandleFunc("PATCH /_fmr/model-pool", s.handlePoolPatch)
@@ -58,6 +60,7 @@ func NewServer(backend Backend, opts Options) (*Server, error) {
 	s.mux.HandleFunc("GET /_fmr/logs", s.handleLogs)
 	s.mux.HandleFunc("GET /_fmr/logs/events", s.handleLogEvents)
 	s.mux.HandleFunc("GET /_fmr/config", s.handleConfig)
+	s.mux.HandleFunc("PUT /_fmr/config", s.handleConfigUpdate)
 	s.mux.HandleFunc("POST /_fmr/stop", s.handleStop)
 	s.auth = security.RequireBearer(s.mux, opts.Token)
 	return s, nil
@@ -146,6 +149,21 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 		data = append(data, modelResponse)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"catalogRevision": snapshot.CatalogRevision, "data": data})
+}
+
+type catalogRefresher interface{ RefreshCatalog(context.Context) error }
+
+func (s *Server) handleCatalogRefresh(w http.ResponseWriter, r *http.Request) {
+	refresher, ok := s.backend.(catalogRefresher)
+	if !ok {
+		writeError(w, http.StatusNotFound, "catalog refresh is unavailable")
+		return
+	}
+	if err := refresher.RefreshCatalog(r.Context()); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "refreshed", "catalogRevision": s.backend.ControlSnapshot().CatalogRevision})
 }
 
 func (s *Server) handlePool(w http.ResponseWriter, _ *http.Request) {
@@ -348,6 +366,28 @@ func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.opts.Config())
+}
+
+func (s *Server) handleConfigUpdate(w http.ResponseWriter, r *http.Request) {
+	if s.opts.UpdateConfig == nil {
+		writeError(w, http.StatusNotFound, "config update endpoint is unavailable")
+		return
+	}
+	var request ConfigUpdateRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	response, err := s.opts.UpdateConfig(request)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, ErrConfigRevisionConflict) {
+			status = http.StatusConflict
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, _ *http.Request) {
