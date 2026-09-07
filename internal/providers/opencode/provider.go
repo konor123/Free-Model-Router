@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,10 @@ import (
 	"github.com/konor123/Free-Model-Router/internal/model"
 	"github.com/konor123/Free-Model-Router/internal/provider"
 )
+
+// DefaultHTTPTimeout bounds catalog and non-streaming completion requests when
+// callers do not provide a request context with an earlier deadline.
+const DefaultHTTPTimeout = 2 * time.Minute
 
 // Provider implements provider.Provider for OpenCode Public.
 type Provider struct {
@@ -31,7 +36,9 @@ func New(baseURL string) *Provider {
 	}
 	return &Provider{
 		BaseURL: baseURL,
-		HTTP:    &http.Client{},
+		// Stream lifetimes are governed by the caller's context. A client-wide
+		// timeout would terminate valid long-running SSE responses.
+		HTTP: &http.Client{},
 	}
 }
 
@@ -56,12 +63,20 @@ type catalogEntry struct {
 
 // DiscoverModels fetches /models and normalizes into ProviderModels.
 func (p *Provider) DiscoverModels(ctx context.Context) (*model.CatalogSnapshot, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(p.BaseURL, "/")+"/models", nil)
+	requestCtx, cancel := context.WithTimeout(ctx, DefaultHTTPTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, strings.TrimRight(p.BaseURL, "/")+"/models", nil)
 	if err != nil {
 		return nil, fmt.Errorf("build catalog request: %w", err)
 	}
 	resp, err := p.HTTP.Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, provider.NewFailureError(model.NewFailure(model.FailureCanceled, model.ScopeRequest), ctx.Err())
+		}
+		if requestCtx.Err() == context.DeadlineExceeded || errors.Is(err, context.DeadlineExceeded) {
+			return nil, provider.NewFailureError(model.NewFailure(model.FailureTimeout, model.ScopeProvider), err)
+		}
 		return nil, provider.NewFailureError(model.NewFailure(model.FailureNetwork, model.ScopeProvider), err)
 	}
 	defer resp.Body.Close()
@@ -78,6 +93,12 @@ func (p *Provider) DiscoverModels(ctx context.Context) (*model.CatalogSnapshot, 
 	var parsed catalogResponse
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, provider.NewFailureError(model.NewFailure(model.FailureCanceled, model.ScopeRequest), ctx.Err())
+		}
+		if requestCtx.Err() == context.DeadlineExceeded || errors.Is(err, context.DeadlineExceeded) {
+			return nil, provider.NewFailureError(model.NewFailure(model.FailureTimeout, model.ScopeProvider), err)
+		}
 		return nil, provider.NewFailureError(model.NewFailure(model.FailureProtocol, model.ScopeProvider), err)
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {

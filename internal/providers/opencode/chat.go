@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -46,6 +47,12 @@ func (p *Provider) ChatCompletion(ctx context.Context, route model.ProviderRoute
 	if err != nil {
 		return nil, err
 	}
+	requestCtx := ctx
+	if !req.Stream {
+		var cancel context.CancelFunc
+		requestCtx, cancel = context.WithTimeout(ctx, DefaultHTTPTimeout)
+		defer cancel()
+	}
 
 	baseURL := p.BaseURL
 	isAuth := strings.HasPrefix(string(route.ID), AuthRouteName+"::")
@@ -57,7 +64,7 @@ func (p *Provider) ChatCompletion(ctx context.Context, route model.ProviderRoute
 		}
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost,
 		strings.TrimRight(baseURL, "/")+"/chat/completions", bytes.NewReader(payload))
 	if err != nil {
 		return nil, provider.NewFailureError(model.NewFailure(model.FailureBadRequest, model.ScopeRequest), err)
@@ -74,6 +81,9 @@ func (p *Provider) ChatCompletion(ctx context.Context, route model.ProviderRoute
 		// Distinguish client cancellation from other network failures.
 		if ctx.Err() != nil {
 			return nil, provider.NewFailureError(model.NewFailure(model.FailureCanceled, model.ScopeRequest), ctx.Err())
+		}
+		if requestCtx.Err() == context.DeadlineExceeded || errors.Is(err, context.DeadlineExceeded) {
+			return nil, provider.NewFailureError(model.NewFailure(model.FailureTimeout, model.ScopeRoute), err)
 		}
 		return nil, provider.NewFailureError(model.NewFailure(model.FailureNetwork, model.ScopeRoute), err)
 	}
@@ -107,6 +117,12 @@ func (p *Provider) ChatCompletion(ctx context.Context, route model.ProviderRoute
 	var out chatResponse
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, provider.NewFailureError(model.NewFailure(model.FailureCanceled, model.ScopeRequest), ctx.Err())
+		}
+		if requestCtx.Err() == context.DeadlineExceeded || errors.Is(err, context.DeadlineExceeded) {
+			return nil, provider.NewFailureError(model.NewFailure(model.FailureTimeout, model.ScopeRoute), err)
+		}
 		return nil, provider.NewFailureError(model.NewFailure(model.FailureProtocol, model.ScopeRoute), err)
 	}
 	if err := json.Unmarshal(body, &out); err != nil {

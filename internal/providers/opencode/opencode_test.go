@@ -15,6 +15,10 @@ import (
 	"github.com/konor123/Free-Model-Router/internal/provider"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 // newMockServer builds a test OpenCode-compatible endpoint.
 func newMockServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *Provider) {
 	t.Helper()
@@ -82,6 +86,68 @@ func TestDiscoverModelsServerError(t *testing.T) {
 	var fe *provider.FailureError
 	if !errors.As(err, &fe) || fe.Failure.Class != model.FailureServerError {
 		t.Fatalf("expected ServerError failure, got %v", err)
+	}
+}
+
+func TestNewLeavesStreamLifetimeToRequestContext(t *testing.T) {
+	p := New("")
+	if p.HTTP == nil || p.HTTP.Timeout != 0 {
+		t.Fatalf("HTTP timeout = %v, want no client-wide timeout", p.HTTP.Timeout)
+	}
+}
+
+func TestDiscoverModelsAddsDefaultRequestDeadline(t *testing.T) {
+	p := New("https://example.test")
+	p.HTTP.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		deadline, ok := r.Context().Deadline()
+		if !ok || time.Until(deadline) <= time.Minute || time.Until(deadline) > DefaultHTTPTimeout {
+			t.Fatalf("catalog request deadline = %v, want within default timeout", deadline)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"data":[]}`)), Header: make(http.Header)}, nil
+	})
+	if _, err := p.DiscoverModels(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestChatCompletionOnlyAddsDefaultDeadlineForNonStreaming(t *testing.T) {
+	p := New("https://example.test")
+	route := PublicRoute(mustID(t, "opencode", "mimo-v2.5"), "mimo-v2.5", model.Capabilities{})
+	p.HTTP.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if _, ok := r.Context().Deadline(); !ok {
+			t.Fatal("non-streaming request must receive a provider deadline")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`)), Header: make(http.Header)}, nil
+	})
+	if _, err := p.ChatCompletion(context.Background(), route, provider.NormalizedRequest{Messages: []provider.Message{{Role: "user", Content: "hi"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	p.HTTP.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if _, ok := r.Context().Deadline(); ok {
+			t.Fatal("streaming request must not receive a provider timeout")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("data: [DONE]\n\n")), Header: make(http.Header)}, nil
+	})
+	stream, err := p.ChatCompletion(context.Background(), route, provider.NormalizedRequest{Stream: true, Messages: []provider.Message{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+}
+
+func TestChatCompletionClientTimeout(t *testing.T) {
+	_, p := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+	})
+	p.HTTP.Timeout = 5 * time.Millisecond
+	route := PublicRoute(mustID(t, "opencode", "mimo-v2.5"), "mimo-v2.5", model.Capabilities{})
+	_, err := p.ChatCompletion(context.Background(), route, provider.NormalizedRequest{
+		Messages: []provider.Message{{Role: "user", Content: "hi"}},
+	})
+	var fe *provider.FailureError
+	if !errors.As(err, &fe) || fe.Failure.Class != model.FailureTimeout {
+		t.Fatalf("expected Timeout failure, got %v", err)
 	}
 }
 
