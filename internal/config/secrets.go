@@ -196,6 +196,30 @@ func (s *SecretStore) Delete(key string) error {
 // DeleteSecret is a descriptive alias for Delete.
 func (s *SecretStore) DeleteSecret(key string) error { return s.Delete(key) }
 
+// DeleteStrict removes a secret from both stores and reports native credential
+// backend failures. Configuration mutation transactions use it when silently
+// retaining stale credential material would be misleading.
+func (s *SecretStore) DeleteStrict(key string) error {
+	if s == nil {
+		return ErrCredentialStoreUnavailable
+	}
+	key, err := normalizeSecretKey(key)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var backendErr error
+	if s.credential != nil {
+		backendErr = s.credential.Delete(key)
+	}
+	fileErr := deleteSecretFromFile(s.filePath, key)
+	if backendErr != nil {
+		return backendErr
+	}
+	return fileErr
+}
+
 type secretFile struct {
 	SchemaVersion int               `json:"schemaVersion"`
 	Secrets       map[string]string `json:"secrets"`

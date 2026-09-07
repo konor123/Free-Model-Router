@@ -19,7 +19,7 @@ const (
 
 	// CurrentSchemaVersion is the newest on-disk configuration schema understood
 	// by this build. A zero version is accepted as the legacy pre-Phase 11 form.
-	CurrentSchemaVersion = 1
+	CurrentSchemaVersion = 2
 
 	// CorruptConfigSuffix is appended to a config path when malformed state is
 	// quarantined during recovery.
@@ -53,6 +53,14 @@ type PersistedConfig struct {
 	// ProviderEnabled records explicit provider enablement choices.
 	ProviderEnabled map[string]bool `json:"providerEnabled,omitempty"`
 
+	// Providers contains configured upstream providers. Credentials are referenced
+	// by name and remain in SecretStore.
+	Providers []ProviderConfig `json:"providers,omitempty"`
+
+	// ConfigRevision serializes desktop configuration mutations independently from
+	// the model-pool revision.
+	ConfigRevision int64 `json:"configRevision,omitempty"`
+
 	// PinnedModel is the optional primary model. When set, it must be in
 	// ModelPool so a stale pin cannot bypass pool membership.
 	PinnedModel string `json:"pinnedModel,omitempty"`
@@ -79,6 +87,7 @@ func PersistedDefaults() *PersistedConfig {
 		ManagementBind: "127.0.0.1:8788",
 		LogLevel:       "info",
 		ModelPoolMode:  "Automatic",
+		Providers:      defaultProviders(),
 	}
 }
 
@@ -89,6 +98,7 @@ func (c *PersistedConfig) Clone() *PersistedConfig {
 	}
 	out := *c
 	out.ModelPool = append([]string(nil), c.ModelPool...)
+	out.Providers = cloneProviders(c.Providers)
 	if c.ProviderEnabled != nil {
 		out.ProviderEnabled = make(map[string]bool, len(c.ProviderEnabled))
 		for provider, enabled := range c.ProviderEnabled {
@@ -200,6 +210,9 @@ func LoadPersisted(path string) (*PersistedConfig, error) {
 		// needs an upgrade rather than destructive recovery.
 		return nil, fmt.Errorf("config schema version %d is newer than supported version %d", cfg.SchemaVersion, CurrentSchemaVersion)
 	}
+	if cfg.SchemaVersion < 2 && len(cfg.Providers) == 0 {
+		cfg.Providers = defaultProviders()
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -286,7 +299,18 @@ func (c *PersistedConfig) validate() error {
 			return errors.New("config: pinned model must be in model pool")
 		}
 	}
+	if err := validateProviders(c.Providers); err != nil {
+		return err
+	}
 	return nil
+}
+
+// Validate checks a candidate configuration without persisting it.
+func (c *PersistedConfig) Validate() error {
+	if c == nil {
+		return errors.New("config must not be nil")
+	}
+	return c.validate()
 }
 
 func recoverCorruptConfig(path string) (*PersistedConfig, error) {
