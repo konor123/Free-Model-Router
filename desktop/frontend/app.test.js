@@ -179,3 +179,21 @@ test("unknown model metrics remain unknown instead of estimated", () => {
   assert.equal(hooks.modelMetric(model, "latency"), null);
   assert.equal(hooks.modelMetric(model, "score"), null);
 });
+
+test("benchmark performance requires an explicit performance signal", () => {
+  const document = createDocument();
+  const source = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
+  const hooks = {};
+  vm.runInNewContext(source, { console, document, URLSearchParams, setInterval() {}, window: { __FMR_TEST__: hooks, __TAURI__: { core: { invoke: async () => ({ data: [] }) } }, location: { search: "" } } }, { filename: "app.js" });
+  const latencyOnly = { routes: [{ effectivePerformance: 50, routingScoreKnown: true, performanceKnown: false, ttftKnown: true }] };
+  const benchmarked = { routes: [{ effectivePerformance: 73.4, routingScoreKnown: true, performanceKnown: true, ttftKnown: false }] };
+  assert.equal(hooks.modelMetric(latencyOnly, "performance"), null);
+  assert.equal(hooks.modelMetric(benchmarked, "performance"), 73.4);
+});
+
+test("provider secrets remain outside the frontend state", () => {
+  const source = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
+  assert.match(source, /const providerSecretChanges = new Map\(\)/);
+  assert.match(source, /not placed in state/);
+  assert.doesNotMatch(source, /configDraft[^\n]*apiKey/);
+});

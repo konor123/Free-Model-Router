@@ -5,8 +5,12 @@ const state = {
   status: null, providers: [], models: [], pool: null, logs: [], error: "",
   searchQuery: "", modelFilters: { provider: "", access: "", status: "all", capability: "" },
   logFilters: { provider: "", result: "", model: "" }, expandedLog: "",
-  activeTab: "provider", config: null, modelSort: { key: "name", direction: "asc" }, fetchedAt: "", notice: ""
+  activeTab: "provider", config: null, configDraft: null, configBaseRevision: 0, configDirty: false, configSaving: false,
+  configGeneration: 0, configReadGeneration: 0, modelSort: { key: "name", direction: "asc" }, fetchedAt: "", notice: ""
 };
+// Provider credentials are deliberately not placed in state: test hooks expose state
+// and a periodic render must never write a replacement secret back into HTML.
+const providerSecretChanges = new Map();
 if (window.__FMR_TEST__) Object.assign(window.__FMR_TEST__, { state, visibleModels: () => visibleModels(), visibleLogs: () => visibleLogs(), modelMetric: (model, key) => modelMetric(model, key) });
 
 function escapeHtml(value) {
@@ -41,11 +45,11 @@ function statusCard() {
 
 function providerCards() {
   const summaries = new Map(state.providers.map((provider) => [provider.id, provider]));
-  const providers = state.config?.providers || [];
+  const providers = editableProviders();
   if (!providers.length) return `<div class="empty">No providers configured.</div>`;
-  return providers.map((provider, index) => {
+  return providers.map((provider) => {
     const summary = summaries.get(provider.id) || {};
-    return `<fieldset class="provider-editor" data-provider-index="${index}"><legend>${escapeHtml(provider.name || provider.id)}</legend><div class="form-grid">
+    return `<fieldset class="provider-editor" data-provider-key="${escapeHtml(provider.clientKey)}"><legend>${escapeHtml(provider.name || provider.id)}</legend><div class="form-grid">
       <label>ID<input data-field="id" value="${escapeHtml(provider.id)}" ${provider.id === "opencode" ? "readonly" : ""}></label>
       <label>Name<input data-field="name" value="${escapeHtml(provider.name)}"></label>
       <label class="wide">Base URL<input data-field="baseUrl" value="${escapeHtml(provider.baseUrl)}"></label>
@@ -53,8 +57,40 @@ function providerCards() {
       <label class="checkbox"><input data-field="enabled" type="checkbox" ${provider.enabled ? "checked" : ""}> Enabled</label>
       <label>API key<input data-field="apiKey" type="password" placeholder="${provider.hasCredential ? "Configured — enter to replace" : "Optional"}" autocomplete="new-password"></label>
       <label class="checkbox"><input data-field="clearKey" type="checkbox"> Clear key</label>
-    </div><div class="muted">${summary.models ?? 0} models · ${summary.routes ?? 0} routes</div>${provider.id === "opencode" ? "" : `<button class="danger" data-remove-provider="${index}">Remove</button>`}</fieldset>`;
+    </div><div class="muted">${summary.models ?? 0} models · ${summary.routes ?? 0} routes</div>${provider.id === "opencode" ? "" : `<button class="danger" data-remove-provider="${escapeHtml(provider.clientKey)}">Remove</button>`}</fieldset>`;
   }).join("");
+}
+
+function newClientKey() {
+  return globalThis.crypto?.randomUUID?.() || `provider-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function cloneProvider(provider) {
+  return { id: provider.id || "", name: provider.name || "", protocol: provider.protocol || "openai-compatible", baseUrl: provider.baseUrl || "", enabled: provider.enabled !== false, hasCredential: Boolean(provider.hasCredential), clientKey: provider.clientKey || newClientKey() };
+}
+
+function beginProviderDraft(config = state.config) {
+  if (!config || state.configDraft) return;
+  state.configDraft = (config.providers || []).map(cloneProvider);
+  state.configBaseRevision = config.revision || 0;
+  state.configDirty = false;
+}
+
+function editableProviders() {
+  beginProviderDraft();
+  return state.configDraft || [];
+}
+
+function clearProviderSecrets() {
+  providerSecretChanges.clear();
+}
+
+function providerDraftByKey(clientKey) {
+  return editableProviders().find((provider) => provider.clientKey === clientKey);
+}
+
+function markProviderDirty() {
+  state.configDirty = true;
 }
 
 function providerView() {
@@ -65,7 +101,7 @@ function providerView() {
       <button class="danger" data-action="quit">Quit</button>
     </div>
     ${state.notice ? `<p class="status-ready">${escapeHtml(state.notice)}</p>` : ""}
-    <section class="card"><div class="toolbar"><h2>Providers</h2><button class="secondary" data-action="add-provider">Add provider</button></div>${providerCards()}<button data-action="save-providers">Save providers</button></section>`;
+    <section class="card"><div class="toolbar"><h2>Providers</h2><button class="secondary" data-action="add-provider">Add provider</button></div><div id="provider-list">${providerCards()}</div><div class="actions"><button data-action="save-providers" ${state.configSaving ? "disabled" : ""}>${state.configSaving ? "Saving…" : "Save providers"}</button><button class="secondary" data-action="discard-providers" ${state.configDirty ? "" : "disabled"}>Discard changes</button></div></section>`;
 }
 
 function endpointView() {
@@ -98,7 +134,7 @@ function knownMetric(value, known) {
 
 function modelMetric(model, key) {
   const route = representativeRoute(model);
-  if (key === "performance") return knownMetric(route?.effectivePerformance, route?.routingScoreKnown);
+  if (key === "performance") return knownMetric(route?.effectivePerformance, route?.performanceKnown);
   if (key === "latency") return knownMetric(route?.latencyScore, route?.ttftKnown);
   if (key === "score") return knownMetric(model.routingScore, model.routingScoreKnown);
   return null;
@@ -169,7 +205,7 @@ function renderModelRows() {
   const rows = modelRows();
   body.innerHTML = rows || `<tr><td colspan="7" class="empty">No models match.</td></tr>`;
   bindModelSelections();
-  document.querySelectorAll("[data-remove-provider]").forEach((button) => button.addEventListener("click", () => removeProvider(Number(button.dataset.removeProvider))));
+  document.querySelectorAll("[data-remove-provider]").forEach((button) => button.addEventListener("click", () => removeProvider(button.dataset.removeProvider)));
 }
 
 function visibleLogs() {
@@ -251,6 +287,49 @@ function render() {
     }
   });
   bindModelSelections();
+  bindProviderEditors();
+}
+
+function bindProviderEditors() {
+  document.querySelectorAll(".provider-editor").forEach((editor) => {
+    const clientKey = editor.dataset.providerKey;
+    editor.querySelectorAll("[data-field]").forEach((input) => input.addEventListener(input.type === "checkbox" ? "change" : "input", (event) => {
+      const field = event.currentTarget.dataset.field;
+      const provider = providerDraftByKey(clientKey);
+      if (!provider) return;
+      if (field === "apiKey" || field === "clearKey") {
+        const change = providerSecretChanges.get(clientKey) || {};
+        if (field === "apiKey") change.value = event.currentTarget.value;
+        else change.clear = event.currentTarget.checked;
+        providerSecretChanges.set(clientKey, change);
+      } else {
+        provider[field] = event.currentTarget.type === "checkbox" ? event.currentTarget.checked : event.currentTarget.value;
+      }
+      markProviderDirty();
+    }));
+  });
+  document.querySelectorAll("[data-remove-provider]").forEach((button) => button.addEventListener("click", () => removeProvider(button.dataset.removeProvider)));
+}
+
+function acceptServerConfig(config) {
+  state.config = config;
+  if (!state.configDirty && !state.configSaving) {
+    state.configDraft = null;
+    state.configBaseRevision = config?.revision || 0;
+  }
+}
+
+function renderProviderCards() {
+  const list = document.getElementById("provider-list");
+  if (!list) return render();
+  list.innerHTML = providerCards();
+  bindProviderEditors();
+}
+
+function renderProviderStatus() {
+  // Do not replace the editable form while a user is typing.
+  const error = document.querySelector(".error");
+  if (error && !state.error) error.remove();
 }
 
 async function refreshStatus() {
@@ -259,12 +338,12 @@ async function refreshStatus() {
     if (state.status?.ready) {
       const [providers, config] = await Promise.all([invoke("gateway_providers"), invoke("gateway_config")]);
       state.providers = providers.data || [];
-      state.config = config;
+      acceptServerConfig(config);
       await startUsageUpdates();
     }
     state.error = "";
   } catch (error) { state.error = error.message || String(error); }
-  render();
+  if (state.activeTab === "provider" && state.configDirty) renderProviderStatus(); else render();
 }
 
 async function refreshModels() {
@@ -289,47 +368,82 @@ async function updateSelection(id, selected) {
 }
 
 async function refreshConfig() {
-  try { state.config = await invoke("gateway_config"); state.error = ""; }
-  catch (error) { state.error = error.message || String(error); }
-  render();
+  const generation = ++state.configReadGeneration;
+  try {
+    const config = await invoke("gateway_config");
+    if (generation === state.configReadGeneration) acceptServerConfig(config);
+    state.error = "";
+  } catch (error) { state.error = error.message || String(error); }
+  if (state.activeTab === "provider" && state.configDirty) renderProviderStatus(); else render();
 }
 
 function collectProviders() {
-  return [...document.querySelectorAll(".provider-editor")].map((editor) => {
-    const field = (name) => editor.querySelector(`[data-field="${name}"]`);
-    const provider = { id: field("id").value.trim(), name: field("name").value.trim(), protocol: field("protocol").value, baseUrl: field("baseUrl").value.trim(), enabled: field("enabled").checked };
-    if (field("clearKey").checked) provider.apiKey = "";
-    else if (field("apiKey").value) provider.apiKey = field("apiKey").value;
-    return provider;
+  return editableProviders().map((provider) => {
+    const update = { id: provider.id.trim(), name: provider.name.trim(), protocol: provider.protocol, baseUrl: provider.baseUrl.trim(), enabled: provider.enabled };
+    const secret = providerSecretChanges.get(provider.clientKey);
+    if (secret?.clear) update.apiKey = "";
+    else if (secret?.value) update.apiKey = secret.value;
+    return update;
   });
 }
 
 function addProvider() {
-  const providers = state.config?.providers || [];
+  const providers = editableProviders();
   let suffix = providers.length + 1;
   while (providers.some((provider) => provider.id === `provider-${suffix}`)) suffix++;
-  providers.push({ id: `provider-${suffix}`, name: `Provider ${suffix}`, protocol: "openai-compatible", baseUrl: "https://example.com/v1", enabled: true, hasCredential: false });
-  render();
+  providers.push({ id: `provider-${suffix}`, name: `Provider ${suffix}`, protocol: "openai-compatible", baseUrl: "https://example.com/v1", enabled: true, hasCredential: false, clientKey: newClientKey() });
+  markProviderDirty();
+  renderProviderCards();
 }
 
-function removeProvider(index) { state.config.providers.splice(index, 1); render(); }
+function removeProvider(clientKey) {
+  const providers = editableProviders();
+  const index = providers.findIndex((provider) => provider.clientKey === clientKey);
+  if (index < 0) return;
+  providerSecretChanges.delete(clientKey);
+  providers.splice(index, 1);
+  markProviderDirty();
+  renderProviderCards();
+}
 
 async function saveConfig(options = {}) {
+  if (state.configSaving) return;
+  const providers = options.providers || collectProviders();
+  const ids = providers.map((provider) => provider.id);
+  if (ids.some((id) => !id) || new Set(ids).size !== ids.length) throw new Error("Each provider needs a unique ID.");
+  state.configSaving = true;
+  state.configGeneration++;
   const bind = document.getElementById("inference-bind")?.value.trim() || state.config.bind;
-  const request = { revision: state.config.revision, bind, providers: options.providers || state.config.providers.map(({ id, name, protocol, baseUrl, enabled }) => ({ id, name, protocol, baseUrl, enabled })) };
+  const request = { revision: state.configBaseRevision || state.config.revision, bind, providers };
   if (options.inferenceKey !== undefined) request.inferenceKey = options.inferenceKey;
   if (options.generateInferenceKey) request.generateInferenceKey = true;
-  const response = await invoke("update_gateway_config", { request });
-  state.config = response.config;
-  state.generatedKey = response.generatedInferenceKey || "";
-  state.notice = response.credentialCleanupPending ? "Saved, but an old credential could not be removed. Retry after checking the OS credential store." : response.restarted ? "Saved and gateway restarted." : response.restartRequired ? "Saved. External gateway restart required." : "Saved.";
+  try {
+    const response = await invoke("update_gateway_config", { request });
+    state.config = response.config;
+    state.configDraft = null;
+    state.configBaseRevision = response.config.revision || 0;
+    state.configDirty = false;
+    clearProviderSecrets();
+    state.generatedKey = response.generatedInferenceKey || "";
+    state.notice = response.credentialCleanupPending ? "Saved, but an old credential could not be removed. Retry after checking the OS credential store." : response.restarted ? "Saved and gateway restarted." : response.restartRequired ? "Saved. External gateway restart required." : "Saved.";
+  } finally {
+    state.configSaving = false;
+  }
   await refreshStatus();
+}
+
+function discardProviders() {
+  state.configDraft = null;
+  state.configBaseRevision = state.config?.revision || 0;
+  state.configDirty = false;
+  clearProviderSecrets();
+  renderProviderCards();
 }
 
 async function switchTab(tab) {
   if (tab !== "endpoint") state.generatedKey = "";
   state.activeTab = tab;
-  render();
+  if (state.activeTab === "model" && document.getElementById("model-table-body")) renderModelRows(); else render();
   if (tab === "model") await refreshModels();
   else if (tab === "usage") await refreshLogs();
   else if (tab === "endpoint") await refreshConfig();
@@ -384,12 +498,17 @@ async function handleAction(action) {
     else if (action === "rediscover") { await invoke("refresh_gateway_catalog"); await refreshModels(); }
     else if (action === "add-provider") addProvider();
     else if (action === "save-providers") await saveConfig({ providers: collectProviders() });
+    else if (action === "discard-providers") discardProviders();
     else if (action === "save-endpoint") {
+      if (state.configDirty) throw new Error("Save or discard provider changes before changing the endpoint.");
       const clear = document.getElementById("clear-inference-key")?.checked;
       const key = document.getElementById("inference-key")?.value;
       await saveConfig({ inferenceKey: clear ? "" : (key || undefined) });
     }
-    else if (action === "generate-key") await saveConfig({ generateInferenceKey: true });
+    else if (action === "generate-key") {
+      if (state.configDirty) throw new Error("Save or discard provider changes before generating a key.");
+      await saveConfig({ generateInferenceKey: true });
+    }
     else if (action === "select-all") await mutatePool({ selectAll: true });
     else if (action === "clear-all") await mutatePool({ clearAll: true });
     else if (action === "select-visible") await mutatePool({ select: visibleModels().map((model) => model.id) });
@@ -400,4 +519,7 @@ async function handleAction(action) {
 
 render();
 refreshStatus();
-setInterval(() => { if (state.activeTab === "provider") refreshStatus(); }, 5000);
+setInterval(() => {
+  if (state.activeTab === "provider") refreshStatus();
+  if (state.activeTab === "model") refreshModels();
+}, 5000);
