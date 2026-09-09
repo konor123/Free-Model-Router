@@ -25,6 +25,17 @@ func TestExactMatchUsesCanonicalIdentity(t *testing.T) {
 	}
 }
 
+func TestMatchUniqueRejectsEqualStrengthCandidates(t *testing.T) {
+	pm := model.ProviderModel{ID: "opencode/kimi-k2.5-free", UpstreamID: "kimi-k2.5-free"}
+	_, ok := MatchUnique(pm, []BenchmarkModel{
+		{SourceModelID: "kimi-a", Name: "Kimi-K2.5"},
+		{SourceModelID: "kimi-b", Name: "Kimi K2.5"},
+	})
+	if ok {
+		t.Fatal("ambiguous benchmark aliases must not bind automatically")
+	}
+}
+
 func TestFamilyMatchStripsDeploymentDate(t *testing.T) {
 	pm := model.ProviderModel{
 		ID:         "openrouter/gpt-4o-2024-08-06",

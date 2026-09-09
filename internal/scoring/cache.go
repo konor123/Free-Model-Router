@@ -29,6 +29,15 @@ type Snapshot struct {
 	RetrievedAt time.Time                `json:"retrievedAt"`
 	Benchmarks  []matcher.BenchmarkModel `json:"benchmarks,omitempty"`
 	Models      map[string]Metrics       `json:"models"`
+	Provenance  *Provenance              `json:"provenance,omitempty"`
+}
+
+// Provenance separates upstream evidence dates from local cache retrieval.
+type Provenance struct {
+	Revision          string    `json:"revision,omitempty"`
+	UpstreamVersion   string    `json:"upstreamVersion,omitempty"`
+	UpstreamUpdatedAt time.Time `json:"upstreamUpdatedAt,omitempty"`
+	PolicyVersion     string    `json:"policyVersion,omitempty"`
 }
 
 // Validate checks the metadata required for a last-known-good snapshot.
@@ -77,6 +86,10 @@ func (s Snapshot) Validate() error {
 // metric pointers or the model map with the cache's internal state.
 func (s Snapshot) Clone() Snapshot {
 	out := s
+	if s.Provenance != nil {
+		copy := *s.Provenance
+		out.Provenance = &copy
+	}
 	if s.Benchmarks != nil {
 		out.Benchmarks = make([]matcher.BenchmarkModel, len(s.Benchmarks))
 		for i, benchmark := range s.Benchmarks {

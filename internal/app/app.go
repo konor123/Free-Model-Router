@@ -18,6 +18,7 @@ import (
 	"github.com/konor123/Free-Model-Router/internal/logging"
 	"github.com/konor123/Free-Model-Router/internal/model"
 	"github.com/konor123/Free-Model-Router/internal/provider"
+	"github.com/konor123/Free-Model-Router/internal/scoring"
 	"github.com/konor123/Free-Model-Router/internal/security"
 	"github.com/konor123/Free-Model-Router/internal/usage"
 )
@@ -105,6 +106,11 @@ func RunWithProvider(ctx context.Context, cfg *config.Config, log *logging.Logge
 	gw.SetUsageSink(usageStore)
 	gw.SetUsageEventPublisher(usageStore)
 	defer usageStore.Close()
+	if benchmarkPath, pathErr := config.DefaultCachePath("openevals-benchmark.json"); pathErr == nil {
+		startBenchmarkRefresh(runCtx, gw, scoring.NewCache(benchmarkPath, scoring.DefaultCacheMaxAge), log)
+	} else {
+		log.Warn("resolve OpenEvals cache path: %v", pathErr)
+	}
 
 	managementBind := strings.TrimSpace(cfg.ManagementBind)
 	controlEnabled := managementBind != "" || cfg.SourcePath != ""

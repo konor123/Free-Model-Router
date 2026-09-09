@@ -71,6 +71,40 @@ func Match(pm model.ProviderModel, benchmarks []BenchmarkModel) BenchmarkBinding
 	return New().Match(pm, benchmarks)
 }
 
+// MatchUnique returns the strongest compatible binding only when it is unique.
+// Benchmark ingestion uses this stricter variant so a lexical tie can never
+// silently assign one leaderboard record to the wrong provider model.
+func MatchUnique(pm model.ProviderModel, benchmarks []BenchmarkModel) (BenchmarkBinding, bool) {
+	return New().MatchUnique(pm, benchmarks)
+}
+
+// MatchUnique applies the normal confidence policy but rejects any equal-rank
+// candidate. Existing Match retains deterministic tie breaking for callers
+// that need the historical behaviour.
+func (m Matcher) MatchUnique(pm model.ProviderModel, benchmarks []BenchmarkModel) (BenchmarkBinding, bool) {
+	best := BenchmarkBinding{MatchMethod: MatchNone}
+	bestRank := -1
+	ambiguous := false
+	for _, benchmark := range benchmarks {
+		if strings.TrimSpace(benchmark.SourceModelID) == "" {
+			continue
+		}
+		method, rank := matchMethod(pm, benchmark)
+		if rank < 0 || rank < bestRank {
+			continue
+		}
+		binding := BenchmarkBinding{CanonicalModelKey: bindingKey(pm, benchmark), SourceModelID: benchmark.SourceModelID, Confidence: m.confidence(method), MatchMethod: method}
+		if rank > bestRank {
+			best, bestRank, ambiguous = binding, rank, false
+			continue
+		}
+		if binding.SourceModelID != best.SourceModelID {
+			ambiguous = true
+		}
+	}
+	return best, bestRank >= 0 && !ambiguous
+}
+
 // Match performs a single match using this matcher's confidence policy.
 func (m Matcher) Match(pm model.ProviderModel, benchmarks []BenchmarkModel) BenchmarkBinding {
 	best := BenchmarkBinding{MatchMethod: MatchNone}

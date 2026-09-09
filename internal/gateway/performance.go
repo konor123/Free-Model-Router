@@ -10,6 +10,8 @@ import (
 	"github.com/konor123/Free-Model-Router/internal/scoring"
 )
 
+const routingTTFTMaxAge = 90 * time.Second
+
 // SetBenchmarkSnapshot installs a validated benchmark snapshot for runtime
 // candidate ranking. Callers may pass the result of scoring.Cache.Resolve;
 // an empty snapshot remains the neutral, latency-only routing mode.
@@ -61,8 +63,8 @@ func (g *Gateway) rebuildBenchmarkBindingsLocked() {
 		return
 	}
 	for id, providerModel := range g.catalog.Models {
-		binding := matcher.Match(providerModel, g.benchmarkSnapshot.Benchmarks)
-		if binding.MatchMethod != matcher.MatchNone {
+		binding, unique := matcher.MatchUnique(providerModel, g.benchmarkSnapshot.Benchmarks)
+		if unique && binding.MatchMethod != matcher.MatchNone {
 			bindings[id] = binding
 		}
 	}
@@ -71,24 +73,28 @@ func (g *Gateway) rebuildBenchmarkBindingsLocked() {
 
 func (g *Gateway) rankCandidates(candidates []router.Candidate) []router.Candidate {
 	if !g.hasPerformanceData(candidates) {
-		return router.Rank(candidates, g.latency.EffectiveTTFT)
+		return router.Rank(candidates, g.freshTTFT)
 	}
 
 	latencies := make([]float64, 0, len(candidates))
 	for _, candidate := range candidates {
-		if ms, ok := g.latency.EffectiveTTFT(string(candidate.Route.ID)); ok {
+		if ms, ok := g.freshTTFT(string(candidate.Route.ID)); ok {
 			latencies = append(latencies, ms)
 		}
 	}
 	score := func(candidate router.Candidate) (float64, bool) {
 		latencyScore := scoring.UnknownScore
-		if ms, ok := g.latency.EffectiveTTFT(string(candidate.Route.ID)); ok {
+		if ms, ok := g.freshTTFT(string(candidate.Route.ID)); ok {
 			latencyScore = scoring.Percentile(ms, latencies, false)
 		}
 		binding := g.benchmarkBindings[candidate.Model.ID]
 		return scoring.ScoreBinding(g.benchmarkSnapshot, binding, latencyScore).RoutingScore, true
 	}
-	return router.RankWithScore(candidates, g.latency.EffectiveTTFT, score)
+	return router.RankWithScore(candidates, g.freshTTFT, score)
+}
+
+func (g *Gateway) freshTTFT(routeID string) (float64, bool) {
+	return g.latency.FreshTTFT(routeID, time.Now(), routingTTFTMaxAge)
 }
 
 func (g *Gateway) hasPerformanceData(candidates []router.Candidate) bool {
