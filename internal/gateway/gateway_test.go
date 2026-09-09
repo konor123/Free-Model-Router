@@ -259,7 +259,7 @@ func TestModelsListReflectsLivePool(t *testing.T) {
 	}
 }
 
-func TestRefreshCatalogKeepsAuthRouteUnknownAndPublicIsolated(t *testing.T) {
+func TestRefreshCatalogKeepsAuthRouteFreeAndPublicIsolated(t *testing.T) {
 	t.Setenv(opencode.AuthRouteEnv, "test-key")
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"data":[{"id":"m"}]}`))
@@ -271,8 +271,8 @@ func TestRefreshCatalogKeepsAuthRouteUnknownAndPublicIsolated(t *testing.T) {
 	}
 	id, _ := model.NewProviderModelID("opencode", "m")
 	routes := g.routes[id]
-	if len(routes) != 2 || routes[0].EffectiveAccess() != model.AccessFree || routes[1].EffectiveAccess() != model.AccessUnknown {
-		t.Fatalf("expected isolated public/free and auth/unknown routes: %+v", routes)
+	if len(routes) != 2 || routes[0].EffectiveAccess() != model.AccessFree || routes[1].EffectiveAccess() != model.AccessFree {
+		t.Fatalf("expected isolated public/free and auth/free routes: %+v", routes)
 	}
 	g.health.RouteFailure(string(routes[0].ID), time.Minute)
 	if !g.health.Available(string(routes[1].ID)) {

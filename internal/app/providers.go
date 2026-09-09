@@ -24,10 +24,23 @@ func configuredProvider(cfg *config.Config, secrets *config.SecretStore) (provid
 		if item.Protocol != config.OpenAICompatibleProtocol {
 			return nil, fmt.Errorf("provider %q uses unsupported protocol %q", item.ID, item.Protocol)
 		}
-		if item.ID == "opencode" && strings.TrimSpace(item.CredentialRef) == "" && strings.TrimRight(item.BaseURL, "/") == opencode.AuthBaseURL {
-			backend := opencode.New(item.BaseURL)
+		if item.ID == "opencode" && strings.TrimRight(item.BaseURL, "/") == opencode.AuthBaseURL {
+			credentialRef := item.CredentialRef
+			backend := opencode.New(item.BaseURL, opencode.WithCredentialResolver(func() (string, error) {
+				if strings.TrimSpace(credentialRef) == "" {
+					return opencode.AuthKey(), nil
+				}
+				if secrets == nil {
+					return "", fmt.Errorf("credential store unavailable")
+				}
+				key, err := secrets.Get(credentialRef)
+				if err == config.ErrSecretNotFound {
+					return "", fmt.Errorf("credential is not configured")
+				}
+				return key, err
+			}))
 			entries = append(entries, registry.Entry{ID: item.ID, Backend: backend, Routes: func(pm model.ProviderModel) ([]model.ProviderRoute, error) {
-				return opencode.Routes(pm.ID, pm.UpstreamID, pm.Base), nil
+				return backend.Routes(pm)
 			}})
 			continue
 		}

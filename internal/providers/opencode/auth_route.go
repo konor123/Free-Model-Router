@@ -26,7 +26,7 @@ func AuthRoute(pmid model.ProviderModelID, upstreamID string) model.ProviderRout
 		Provider:        ProviderID,
 		UpstreamModelID: upstreamID,
 		CredentialID:    AuthRouteName,
-		Access:          model.AccessUnknown,
+		Access:          model.AccessFree,
 		Enabled:         true,
 		CapabilityOverride: &model.Capabilities{
 			Streaming:        true,
@@ -46,9 +46,18 @@ func AuthKey() string {
 // RoutesFor returns all enabled routes for a model given the current auth state.
 // No key → Public only. Key present → Public + Zen Auth (PLAN_V7 §9).
 func Routes(pmid model.ProviderModelID, upstreamID string, caps model.Capabilities) []model.ProviderRoute {
-	routes := []model.ProviderRoute{PublicRoute(pmid, upstreamID, caps)}
+	// Retain the package-level environment-backed helper for legacy single-
+	// provider callers. Production configured providers use Provider.Routes,
+	// which enforces the native free-model policy.
+	routes := []model.ProviderRoute{legacyPublicRoute(pmid, upstreamID, caps)}
 	if AuthKey() != "" {
 		routes = append(routes, AuthRoute(pmid, upstreamID))
 	}
 	return routes
+}
+
+func legacyPublicRoute(pmid model.ProviderModelID, upstreamID string, caps model.Capabilities) model.ProviderRoute {
+	route := PublicRoute(pmid, upstreamID, caps)
+	route.Access = model.AccessFree
+	return route
 }

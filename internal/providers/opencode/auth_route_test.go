@@ -40,8 +40,8 @@ func TestKeyPresentAddsAuthRoute(t *testing.T) {
 	if auth.ID != model.RouteID("opencode-zen::mimo-v2.5") {
 		t.Fatalf("unexpected auth route %q", auth.ID)
 	}
-	if auth.Access != model.AccessUnknown {
-		t.Fatalf("auth route access should be Unknown until verified, got %q", auth.Access)
+	if auth.Access != model.AccessFree {
+		t.Fatalf("auth route access should be Free, got %q", auth.Access)
 	}
 	if auth.ModelID != pmid {
 		t.Fatal("auth route must reference same ProviderModel")
@@ -53,7 +53,7 @@ func TestRouteAccessIndependence(t *testing.T) {
 	pmid := mustID(t, "opencode", "mimo-v2.5")
 	routes := Routes(pmid, "mimo-v2.5", model.Capabilities{})
 	pub, auth := routes[0], routes[1]
-	if pub.Access != model.AccessFree || auth.Access != model.AccessUnknown {
+	if pub.Access != model.AccessFree || auth.Access != model.AccessFree {
 		t.Fatalf("access must be route-specific: pub=%q auth=%q", pub.Access, auth.Access)
 	}
 	if pub.ID == auth.ID {
@@ -73,7 +73,7 @@ func TestAuthRouteStateIsolationOnFailure(t *testing.T) {
 	if !auth.Enabled {
 		t.Fatal("auth route must stay enabled; failure state lives elsewhere")
 	}
-	if auth.Access != model.AccessUnknown {
+	if auth.Access != model.AccessFree {
 		t.Fatal("auth access must be unchanged by failures")
 	}
 }

@@ -43,6 +43,9 @@ type chatToolFunc struct {
 // Route isolation: auth route (opencode-zen::) targets the Zen base URL with a
 // Bearer key; public route targets the anonymous base URL with no credentials.
 func (p *Provider) ChatCompletion(ctx context.Context, route model.ProviderRoute, req provider.NormalizedRequest) (provider.ChatStream, error) {
+	if p.nativeFreeOnly && !isVerifiedAnonymousFree(route.UpstreamModelID) {
+		return nil, provider.NewFailureError(model.NewFailure(model.FailureAuth, model.ScopeCredential), errors.New("model is not eligible for native anonymous OpenCode"))
+	}
 	payload, err := buildPayload(route.UpstreamModelID, req)
 	if err != nil {
 		return nil, err
@@ -71,9 +74,11 @@ func (p *Provider) ChatCompletion(ctx context.Context, route model.ProviderRoute
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if isAuth {
-		if key := AuthKey(); key != "" {
-			httpReq.Header.Set("Authorization", "Bearer "+key)
+		key, credentialErr := p.credential()
+		if credentialErr != nil || strings.TrimSpace(key) == "" {
+			return nil, provider.NewFailureError(model.NewFailure(model.FailureAuth, model.ScopeCredential), errors.New("OpenCode Zen credential is unavailable"))
 		}
+		httpReq.Header.Set("Authorization", "Bearer "+key)
 	}
 
 	resp, err := p.HTTP.Do(httpReq)

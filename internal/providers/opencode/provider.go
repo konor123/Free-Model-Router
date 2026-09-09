@@ -27,19 +27,37 @@ type Provider struct {
 	AuthBaseOverride string
 	// HTTP client used for all calls.
 	HTTP *http.Client
+	resolveCredential ResolveCredential
+	nativeFreeOnly    bool
+}
+
+// ResolveCredential retrieves an instance-local Zen credential immediately
+// before an authenticated request. It must not retain plaintext credentials.
+type ResolveCredential func() (string, error)
+
+type option func(*Provider)
+
+// WithCredentialResolver configures the native Zen credential source.
+func WithCredentialResolver(resolve ResolveCredential) option {
+	return func(p *Provider) { p.resolveCredential = resolve }
 }
 
 // New builds a Provider with sane defaults.
-func New(baseURL string) *Provider {
+func New(baseURL string, options ...option) *Provider {
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
-	return &Provider{
+	p := &Provider{
 		BaseURL: baseURL,
 		// Stream lifetimes are governed by the caller's context. A client-wide
 		// timeout would terminate valid long-running SSE responses.
-		HTTP: &http.Client{},
+		HTTP:           &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+		nativeFreeOnly: strings.TrimRight(baseURL, "/") == AuthBaseURL,
 	}
+	for _, apply := range options {
+		apply(p)
+	}
+	return p
 }
 
 // catalogResponse mirrors GET /models on an OpenAI-compatible endpoint.
@@ -156,7 +174,42 @@ func (p *Provider) DiscoverModels(ctx context.Context) (*model.CatalogSnapshot, 
 		}
 		snap.Models[pmid] = pm
 	}
+	if p.nativeFreeOnly {
+		for id, pm := range snap.Models {
+			if !isVerifiedAnonymousFree(pm.UpstreamID) {
+				delete(snap.Models, id)
+			}
+		}
+	}
 	return snap, nil
+}
+
+// Routes builds routes for one native OpenCode model. Public and Zen routes
+// are limited to the same verified-free model policy.
+func (p *Provider) Routes(pm model.ProviderModel) ([]model.ProviderRoute, error) {
+	if p.nativeFreeOnly && !isVerifiedAnonymousFree(pm.UpstreamID) {
+		return nil, nil
+	}
+	routes := []model.ProviderRoute{PublicRoute(pm.ID, pm.UpstreamID, pm.Base)}
+	if p.hasCredential() {
+		routes = append(routes, AuthRoute(pm.ID, pm.UpstreamID))
+	}
+	return routes, nil
+}
+
+func (p *Provider) hasCredential() bool {
+	if p.resolveCredential != nil {
+		key, err := p.resolveCredential()
+		return err == nil && strings.TrimSpace(key) != ""
+	}
+	return AuthKey() != ""
+}
+
+func (p *Provider) credential() (string, error) {
+	if p.resolveCredential != nil {
+		return p.resolveCredential()
+	}
+	return AuthKey(), nil
 }
 
 // canonicalize maps a provider model id to a canonical benchmark key by
