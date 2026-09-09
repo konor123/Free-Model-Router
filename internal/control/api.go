@@ -98,6 +98,7 @@ type RouteResponse struct {
 	TTFTMs               float64             `json:"ttftMs,omitempty"`
 	TTFTKnown            bool                `json:"ttftKnown"`
 	Performance          float64             `json:"performance,omitempty"`
+	PerformanceKnown     bool                `json:"performanceKnown"`
 	EffectivePerformance float64             `json:"effectivePerformance,omitempty"`
 	Confidence           float64             `json:"confidence,omitempty"`
 	LatencyScore         float64             `json:"latencyScore,omitempty"`

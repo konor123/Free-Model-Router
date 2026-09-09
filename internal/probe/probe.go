@@ -34,8 +34,9 @@ type Scheduler struct {
 	runID   uint64
 }
 
-// DefaultProbeTimeout bounds both slot acquisition and one upstream probe.
+// DefaultProbeTimeout bounds one upstream probe after a provider slot is held.
 const DefaultProbeTimeout = 10 * time.Second
+const maxConcurrentProbes = 4
 
 // Snapshot is an immutable, coherent probe view loaded once per cycle.
 type Snapshot struct {
@@ -143,9 +144,21 @@ func (s *Scheduler) runOnce(ctx context.Context, source SnapshotSource) {
 		return
 	}
 	targets := EligibleTargets(snap.Catalog, snap.Pool, snap.Routes, s.Health)
+	sem := make(chan struct{}, maxConcurrentProbes)
+	var workers sync.WaitGroup
 	for _, target := range targets {
-		s.probeOnce(ctx, target, snap.Provider)
+		if ctx.Err() != nil {
+			break
+		}
+		sem <- struct{}{}
+		workers.Add(1)
+		go func(target Target) {
+			defer workers.Done()
+			defer func() { <-sem }()
+			s.probeOnce(ctx, target, snap.Provider)
+		}(target)
 	}
+	workers.Wait()
 }
 
 func (s *Scheduler) jitteredInterval() time.Duration {
@@ -180,13 +193,17 @@ func (s *Scheduler) ProbeOnce(ctx context.Context, t Target, prov provider.Provi
 }
 
 func (s *Scheduler) probeOnce(ctx context.Context, t Target, prov provider.Provider) {
-	probeCtx, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-	release, err := s.Health.AcquireSlot(probeCtx, t.Route.Provider)
+	// Queueing behind a busy provider is not evidence that this route timed out.
+	// Keep the short slot wait separate from the upstream measurement deadline.
+	slotCtx, cancelSlot := context.WithTimeout(ctx, 2*time.Second)
+	release, err := s.Health.AcquireSlot(slotCtx, t.Route.Provider)
+	cancelSlot()
 	if err != nil {
 		return
 	}
 	defer release()
+	probeCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
 
 	req := provider.NormalizedRequest{
 		Messages:  []provider.Message{{Role: "user", Content: "ping"}},

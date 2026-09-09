@@ -55,9 +55,12 @@ func (e *EWMA) Samples() int {
 
 // Stats bundles the three maintained averages for one route.
 type Stats struct {
-	ProbeTTFT    *EWMA // from probe requests
-	RequestTTFT  *EWMA // from real client requests
-	RequestTotal *EWMA // total latency of real requests
+	ProbeTTFT     *EWMA // from probe requests
+	RequestTTFT   *EWMA // from real client requests
+	RequestTotal  *EWMA // total latency of real requests
+	mu            sync.RWMutex
+	LastProbeAt   time.Time
+	LastRequestAt time.Time
 }
 
 // NewStats builds empty stats.
@@ -94,7 +97,11 @@ func (r *Registry) For(routeID string) *Stats {
 // RecordProbe records a probe TTFT sample for the route.
 func (r *Registry) RecordProbe(routeID string, ttftMs float64) {
 	if ttftMs > UnknownMs {
-		r.For(routeID).ProbeTTFT.Add(ttftMs)
+		s := r.For(routeID)
+		s.ProbeTTFT.Add(ttftMs)
+		s.mu.Lock()
+		s.LastProbeAt = time.Now()
+		s.mu.Unlock()
 	}
 }
 
@@ -103,10 +110,37 @@ func (r *Registry) RecordRequest(routeID string, ttftMs, totalMs float64) {
 	s := r.For(routeID)
 	if ttftMs > UnknownMs {
 		s.RequestTTFT.Add(ttftMs)
+		s.mu.Lock()
+		s.LastRequestAt = time.Now()
+		s.mu.Unlock()
 	}
 	if totalMs > UnknownMs {
 		s.RequestTotal.Add(totalMs)
 	}
+}
+
+// FreshTTFT prefers a fresh controlled probe, then a fresh real request.
+// Older samples remain available through EffectiveTTFT for diagnostics but do
+// not participate in routing decisions.
+func (r *Registry) FreshTTFT(routeID string, now time.Time, maxAge time.Duration) (float64, bool) {
+	r.mu.RLock()
+	s, exists := r.routes[routeID]
+	r.mu.RUnlock()
+	if !exists {
+		return 0, false
+	}
+	s.mu.RLock()
+	probeAt, requestAt := s.LastProbeAt, s.LastRequestAt
+	s.mu.RUnlock()
+	if maxAge > 0 && !probeAt.IsZero() && now.Sub(probeAt) <= maxAge {
+		if value, ok := s.ProbeTTFT.Value(); ok {
+			return value, true
+		}
+	}
+	if maxAge > 0 && !requestAt.IsZero() && now.Sub(requestAt) <= maxAge {
+		return s.RequestTTFT.Value()
+	}
+	return 0, false
 }
 
 // EffectiveTTFT returns the best available routing estimate: probes are

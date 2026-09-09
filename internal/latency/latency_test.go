@@ -2,6 +2,7 @@ package latency
 
 import (
 	"testing"
+	"time"
 )
 
 func TestEWMAFirstSampleWins(t *testing.T) {
@@ -9,6 +10,20 @@ func TestEWMAFirstSampleWins(t *testing.T) {
 	e.Add(100)
 	if v, ok := e.Value(); !ok || v != 100 {
 		t.Fatalf("first sample should be value: %v %v", v, ok)
+	}
+}
+
+func TestFreshTTFTFallsBackFromStaleProbeToRequest(t *testing.T) {
+	r := NewRegistry()
+	r.RecordProbe("route", 500)
+	r.RecordRequest("route", 100, 500)
+	s := r.For("route")
+	s.mu.Lock()
+	s.LastProbeAt = time.Now().Add(-2 * time.Minute)
+	s.LastRequestAt = time.Now()
+	s.mu.Unlock()
+	if value, ok := r.FreshTTFT("route", time.Now(), 90*time.Second); !ok || value != 100 {
+		t.Fatalf("want fresh request fallback, got %v %v", value, ok)
 	}
 }
 

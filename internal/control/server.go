@@ -141,7 +141,7 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 					ConsecutiveFailures: route.Health.ConsecutiveFailures, Available: available,
 				},
 				TTFTMs: route.TTFTMs, TTFTKnown: route.TTFTKnown,
-				Performance: route.Performance, EffectivePerformance: route.EffectivePerformance,
+				Performance: route.Performance, PerformanceKnown: route.PerformanceKnown, EffectivePerformance: route.EffectivePerformance,
 				Confidence: route.Confidence, LatencyScore: route.LatencyScore,
 				RoutingScore: route.RoutingScore, RoutingScoreKnown: route.RoutingScoreKnown,
 			})
