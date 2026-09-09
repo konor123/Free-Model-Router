@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::env;
-use std::fs::{self, File};
+use std::fs::{self};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -19,11 +19,18 @@ use std::time::{Duration, Instant};
 use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+#[cfg(windows)]
+use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
+#[cfg(windows)]
+use winreg::RegKey;
 
 const API_VERSION: &str = "1";
 const DEFAULT_GATEWAY_ADDRESS: &str = "127.0.0.1:8788";
 const DEFAULT_SIDECAR_NAME: &str = "Free-Model-Router.exe";
 const DEFAULT_METADATA_SUFFIX: &str = ".metadata.json";
+const AUTOSTART_VALUE_NAME: &str = "Free-Model-Router";
+#[cfg(windows)]
+const AUTOSTART_REGISTRY_PATH: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -449,6 +456,7 @@ fn attach_or_start_internal(
             command.args(["-config", config_path.trim()]);
         }
     }
+    configure_managed_sidecar_command(&mut command);
     let mut child = command
         .spawn()
         .map_err(|error| format!("start managed gateway: {error}"))?;
@@ -650,7 +658,7 @@ fn stop_managed(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
-fn autostart_path() -> Result<PathBuf, String> {
+fn legacy_autostart_path() -> Result<PathBuf, String> {
     let app_data = env::var("APPDATA").map_err(|_| "APPDATA is not set".to_string())?;
     Ok(PathBuf::from(app_data)
         .join("Microsoft")
@@ -661,23 +669,70 @@ fn autostart_path() -> Result<PathBuf, String> {
         .join("Free-Model-Router.cmd"))
 }
 
-fn write_autostart_file(path: &Path, command: &str) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "autostart path has no parent".to_string())?;
-    fs::create_dir_all(parent).map_err(|error| format!("create startup directory: {error}"))?;
-    let temp = parent.join(format!(".fmr-autostart-{}.tmp", std::process::id()));
-    let mut file =
-        File::create(&temp).map_err(|error| format!("create autostart temp file: {error}"))?;
-    write!(file, "@echo off\r\nstart \"\" \"{}\"\r\n", command)
-        .map_err(|error| format!("write autostart file: {error}"))?;
-    file.sync_all()
-        .map_err(|error| format!("sync autostart file: {error}"))?;
-    drop(file);
-    if path.exists() {
-        fs::remove_file(path).map_err(|error| format!("replace autostart file: {error}"))?;
+#[cfg(windows)]
+fn autostart_registry() -> Result<RegKey, String> {
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags(AUTOSTART_REGISTRY_PATH, KEY_READ | KEY_WRITE)
+        .map_err(|error| format!("open Windows startup registry: {error}"))
+}
+
+#[cfg(windows)]
+fn create_autostart_registry() -> Result<RegKey, String> {
+    RegKey::predef(HKEY_CURRENT_USER)
+        .create_subkey(AUTOSTART_REGISTRY_PATH)
+        .map(|(key, _)| key)
+        .map_err(|error| format!("create Windows startup registry: {error}"))
+}
+
+#[cfg(windows)]
+fn autostart_enabled(executable: &Path) -> Result<bool, String> {
+    let registry = match autostart_registry() {
+        Ok(registry) => registry,
+        Err(_) => return Ok(false),
+    };
+    let value: String = match registry.get_value(AUTOSTART_VALUE_NAME) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("read Windows startup registry: {error}")),
+    };
+    Ok(value == autostart_value(executable))
+}
+
+#[cfg(windows)]
+fn set_autostart_registry(executable: &Path, enabled: bool) -> Result<(), String> {
+    if enabled {
+        let registry = create_autostart_registry()?;
+        registry
+            .set_value(AUTOSTART_VALUE_NAME, &autostart_value(executable))
+            .map_err(|error| format!("write Windows startup registry: {error}"))?;
+    } else if let Err(error) = autostart_registry()?.delete_value(AUTOSTART_VALUE_NAME) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!("remove Windows startup registry: {error}"));
+        }
     }
-    fs::rename(&temp, path).map_err(|error| format!("install autostart file: {error}"))
+    Ok(())
+}
+
+fn autostart_value(executable: &Path) -> String {
+    format!("\"{}\"", executable.display())
+}
+
+#[cfg(not(windows))]
+fn autostart_enabled(_: &Path) -> Result<bool, String> {
+    Ok(false)
+}
+
+#[cfg(not(windows))]
+fn set_autostart_registry(_: &Path, _: bool) -> Result<(), String> {
+    Err("Start with Windows is only available on Windows".to_string())
+}
+
+fn configure_managed_sidecar_command(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
 }
 
 #[tauri::command]
@@ -771,13 +826,13 @@ fn gateway_logs(state: State<'_, AppState>) -> Result<Value, String> {
 
 #[tauri::command]
 fn set_autostart(enabled: bool) -> Result<bool, String> {
-    let path = autostart_path()?;
-    if enabled {
-        let executable =
-            env::current_exe().map_err(|error| format!("resolve desktop executable: {error}"))?;
-        write_autostart_file(&path, &executable.display().to_string())?;
-    } else if path.exists() {
-        fs::remove_file(&path).map_err(|error| format!("remove autostart file: {error}"))?;
+    let executable =
+        env::current_exe().map_err(|error| format!("resolve desktop executable: {error}"))?;
+    set_autostart_registry(&executable, enabled)?;
+    if let Ok(legacy) = legacy_autostart_path() {
+        if legacy.exists() {
+            let _ = fs::remove_file(&legacy);
+        }
     }
     Ok(enabled)
 }
@@ -790,8 +845,10 @@ fn shutdown(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
 }
 
 fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    let executable =
+        env::current_exe().map_err(|error| format!("resolve desktop executable: {error}"))?;
     let autostart = CheckMenuItemBuilder::with_id("autostart", "Start with Windows")
-        .checked(autostart_path().map(|path| path.exists()).unwrap_or(false))
+        .checked(autostart_enabled(&executable).unwrap_or(false))
         .build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Exit").build(app)?;
     let menu = MenuBuilder::new(app).items(&[&autostart, &quit]).build()?;
@@ -975,13 +1032,11 @@ mod tests {
     }
 
     #[test]
-    fn autostart_file_is_written_atomically_with_expected_command() {
-        let path = std::env::temp_dir().join(format!("fmr-autostart-{}.cmd", random_token()));
-        write_autostart_file(&path, r"C:\FMR\free-model-router-desktop.exe").unwrap();
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("@echo off"));
-        assert!(content.contains("free-model-router-desktop.exe"));
-        std::fs::remove_file(path).unwrap();
+    fn autostart_registry_value_quotes_executable_path() {
+        assert_eq!(
+            autostart_value(Path::new(r"C:\FMR App\free-model-router-desktop.exe")),
+            r#""C:\FMR App\free-model-router-desktop.exe""#
+        );
     }
 
     #[test]
