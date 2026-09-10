@@ -647,8 +647,15 @@ fn stop_managed(state: &AppState) -> Result<(), String> {
         .map_err(|_| "desktop runtime lock is poisoned".to_string())?;
     if should_stop(runtime.ownership) {
         if let Some(mut child) = runtime.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            if let Err(error) = child.kill() {
+                runtime.child = Some(child);
+                return Err(format!("stop managed gateway: {error}"));
+            }
+            if let Err(error) = child.wait() {
+                runtime.child = None;
+                runtime.status = None;
+                return Err(format!("wait for managed gateway: {error}"));
+            }
         }
     } else {
         runtime.child = None;
@@ -808,13 +815,42 @@ fn update_gateway_config(state: State<'_, AppState>, request: Value) -> Result<V
         runtime.ownership == Ownership::DesktopManaged
     };
     let mut response = control_request(&state, "PUT", "/_fmr/config", Some(&request))?;
+    if let Some(object) = response.as_object_mut() {
+        object.insert("saved".to_string(), Value::Bool(true));
+    }
     if managed {
-        stop_managed(&state)?;
-        attach_or_start_internal(&state, None)?;
+        let activation = stop_managed(&state).and_then(|_| attach_or_start_internal(&state, None));
         if let Some(object) = response.as_object_mut() {
-            object.insert("restarted".to_string(), Value::Bool(true));
-            object.insert("restartRequired".to_string(), Value::Bool(false));
+            match activation {
+                Ok(_) => {
+                    object.insert("restarted".to_string(), Value::Bool(true));
+                    object.insert("restartRequired".to_string(), Value::Bool(false));
+                    object.insert(
+                        "activationState".to_string(),
+                        Value::String("running".to_string()),
+                    );
+                }
+                Err(error) => {
+                    if let Ok(mut runtime) = state.runtime.lock() {
+                        runtime.error = Some(error.clone());
+                    }
+                    object.insert("restarted".to_string(), Value::Bool(false));
+                    object.insert("restartRequired".to_string(), Value::Bool(true));
+                    object.insert(
+                        "activationState".to_string(),
+                        Value::String("start-failed".to_string()),
+                    );
+                    object.insert("restartError".to_string(), Value::String(error));
+                }
+            }
         }
+    } else if let Some(object) = response.as_object_mut() {
+        object.insert("restarted".to_string(), Value::Bool(false));
+        object.insert("restartRequired".to_string(), Value::Bool(true));
+        object.insert(
+            "activationState".to_string(),
+            Value::String("external-restart-required".to_string()),
+        );
     }
     Ok(response)
 }

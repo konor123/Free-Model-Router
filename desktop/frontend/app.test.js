@@ -197,3 +197,21 @@ test("provider secrets remain outside the frontend state", () => {
   assert.match(source, /not placed in state/);
   assert.doesNotMatch(source, /configDraft[^\n]*apiKey/);
 });
+
+test("older config refresh cannot replace an acknowledged provider configuration", () => {
+  const document = createDocument();
+  const source = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
+  const hooks = {};
+  vm.runInNewContext(source, { console, document, URLSearchParams, setInterval() {}, window: { __FMR_TEST__: hooks, __TAURI__: { core: { invoke: async () => ({ data: [] }) } }, location: { search: "" } } }, { filename: "app.js" });
+  hooks.state.latestAcknowledgedRevision = 8;
+  hooks.state.config = { revision: 8, providers: [{ id: "saved" }] };
+  const accepted = hooks.acceptServerConfig({ revision: 7, providers: [] });
+  assert.equal(accepted, false);
+  assert.deepEqual(hooks.state.config.providers, [{ id: "saved" }]);
+});
+
+test("provider save validation requires an enabled provider", () => {
+  const source = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
+  assert.match(source, /providers\.some\(\(provider\) => provider\.enabled\)/);
+  assert.match(source, /At least one provider must be enabled/);
+});

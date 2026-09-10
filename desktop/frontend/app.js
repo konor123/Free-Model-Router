@@ -6,12 +6,12 @@ const state = {
   searchQuery: "", modelFilters: { provider: "", access: "", status: "all", capability: "" },
   logFilters: { provider: "", result: "", model: "" }, expandedLog: "",
   activeTab: "provider", config: null, configDraft: null, configBaseRevision: 0, configDirty: false, configSaving: false,
-  configGeneration: 0, configReadGeneration: 0, modelSort: { key: "name", direction: "asc" }, fetchedAt: "", notice: ""
+  configGeneration: 0, configReadGeneration: 0, configMutationEpoch: 0, latestAcknowledgedRevision: -1, lifecycleError: "", modelSort: { key: "name", direction: "asc" }, fetchedAt: "", notice: ""
 };
 // Provider credentials are deliberately not placed in state: test hooks expose state
 // and a periodic render must never write a replacement secret back into HTML.
 const providerSecretChanges = new Map();
-if (window.__FMR_TEST__) Object.assign(window.__FMR_TEST__, { state, visibleModels: () => visibleModels(), visibleLogs: () => visibleLogs(), modelMetric: (model, key) => modelMetric(model, key) });
+if (window.__FMR_TEST__) Object.assign(window.__FMR_TEST__, { state, visibleModels: () => visibleModels(), visibleLogs: () => visibleLogs(), modelMetric: (model, key) => modelMetric(model, key), acceptServerConfig, collectProviders: () => collectProviders() });
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>\"']/g, (character) => ({
@@ -100,7 +100,7 @@ function providerView() {
       <button data-action="attach">Attach / Start Gateway</button>
       <button class="danger" data-action="quit">Quit</button>
     </div>
-    ${state.notice ? `<p class="status-ready">${escapeHtml(state.notice)}</p>` : ""}
+    ${state.notice ? `<p class="status-ready">${escapeHtml(state.notice)}</p>` : ""}${state.lifecycleError ? `<p class="error">${escapeHtml(state.lifecycleError)}</p>` : ""}
     <section class="card"><div class="toolbar"><h2>Providers</h2><button class="secondary" data-action="add-provider">Add provider</button></div><div id="provider-list">${providerCards()}</div><div class="actions"><button data-action="save-providers" ${state.configSaving ? "disabled" : ""}>${state.configSaving ? "Saving…" : "Save providers"}</button><button class="secondary" data-action="discard-providers" ${state.configDirty ? "" : "disabled"}>Discard changes</button></div></section>`;
 }
 
@@ -312,11 +312,14 @@ function bindProviderEditors() {
 }
 
 function acceptServerConfig(config) {
+  if (!config || (Number.isFinite(config.revision) && config.revision < state.latestAcknowledgedRevision)) return false;
   state.config = config;
+  if (Number.isFinite(config?.revision)) state.latestAcknowledgedRevision = Math.max(state.latestAcknowledgedRevision, config.revision);
   if (!state.configDirty && !state.configSaving) {
     state.configDraft = null;
     state.configBaseRevision = config?.revision || 0;
   }
+  return true;
 }
 
 function renderProviderCards() {
@@ -333,10 +336,19 @@ function renderProviderStatus() {
 }
 
 async function refreshStatus() {
+  if (state.configSaving) return;
+  const epoch = state.configMutationEpoch;
+  const generation = ++state.configReadGeneration;
   try {
-    state.status = await invoke("desktop_status");
-    if (state.status?.ready) {
-      const [providers, config] = await Promise.all([invoke("gateway_providers"), invoke("gateway_config")]);
+    const status = await invoke("desktop_status");
+    let providers = null;
+    let config = null;
+    if (status?.ready) {
+      [providers, config] = await Promise.all([invoke("gateway_providers"), invoke("gateway_config")]);
+    }
+    if (epoch !== state.configMutationEpoch || generation !== state.configReadGeneration) return;
+    state.status = status;
+    if (status?.ready) {
       state.providers = providers.data || [];
       acceptServerConfig(config);
       await startUsageUpdates();
@@ -368,10 +380,13 @@ async function updateSelection(id, selected) {
 }
 
 async function refreshConfig() {
+  if (state.configSaving) return;
+  const epoch = state.configMutationEpoch;
   const generation = ++state.configReadGeneration;
   try {
     const config = await invoke("gateway_config");
-    if (generation === state.configReadGeneration) acceptServerConfig(config);
+    if (epoch !== state.configMutationEpoch || generation !== state.configReadGeneration) return;
+    acceptServerConfig(config);
     state.error = "";
   } catch (error) { state.error = error.message || String(error); }
   if (state.activeTab === "provider" && state.configDirty) renderProviderStatus(); else render();
@@ -408,26 +423,32 @@ function removeProvider(clientKey) {
 
 async function saveConfig(options = {}) {
   if (state.configSaving) return;
-  const providers = options.providers || collectProviders();
+  const providers = options.providers || (options.inferenceKey !== undefined || options.generateInferenceKey
+    ? (state.config?.providers || []).map(({ id, name, protocol, baseUrl, enabled }) => ({ id, name, protocol, baseUrl, enabled }))
+    : collectProviders());
   const ids = providers.map((provider) => provider.id);
   if (ids.some((id) => !id) || new Set(ids).size !== ids.length) throw new Error("Each provider needs a unique ID.");
+  if (!providers.some((provider) => provider.enabled)) throw new Error("At least one provider must be enabled.");
   state.configSaving = true;
-  state.configGeneration++;
+  state.configMutationEpoch++;
   const bind = document.getElementById("inference-bind")?.value.trim() || state.config.bind;
-  const request = { revision: state.configBaseRevision || state.config.revision, bind, providers };
+  const request = { revision: state.configBaseRevision ?? state.config.revision, bind, providers };
   if (options.inferenceKey !== undefined) request.inferenceKey = options.inferenceKey;
   if (options.generateInferenceKey) request.generateInferenceKey = true;
   try {
     const response = await invoke("update_gateway_config", { request });
     state.config = response.config;
     state.configDraft = null;
-    state.configBaseRevision = response.config.revision || 0;
+    state.configBaseRevision = response.config.revision ?? 0;
+    state.latestAcknowledgedRevision = Math.max(state.latestAcknowledgedRevision, response.config.revision ?? -1);
     state.configDirty = false;
     clearProviderSecrets();
     state.generatedKey = response.generatedInferenceKey || "";
-    state.notice = response.credentialCleanupPending ? "Saved, but an old credential could not be removed. Retry after checking the OS credential store." : response.restarted ? "Saved and gateway restarted." : response.restartRequired ? "Saved. External gateway restart required." : "Saved.";
+    state.lifecycleError = response.activationState && response.activationState !== "running" && response.activationState !== "external-restart-required" ? (response.restartError || "Saved, but the gateway could not restart. Use Attach / Start Gateway to retry.") : "";
+    state.notice = response.credentialCleanupPending ? "Saved, but an old credential could not be removed. Retry after checking the OS credential store." : response.restarted ? "Saved and gateway restarted." : response.restartRequired ? "Saved. Gateway restart required." : "Saved.";
   } finally {
     state.configSaving = false;
+    state.configMutationEpoch++;
   }
   await refreshStatus();
 }
