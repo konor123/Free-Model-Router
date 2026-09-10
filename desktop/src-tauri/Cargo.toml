@@ -1,6 +1,6 @@
 [package]
 name = "free-model-router-desktop"
-version = "0.8.3"
+version = "0.8.4"
 description = "Free-Model-Router desktop shell"
 authors = ["Free-Model-Router contributors"]
 license = "MIT"
