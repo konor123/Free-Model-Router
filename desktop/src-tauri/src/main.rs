@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Mutex,
+    mpsc, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -108,6 +108,8 @@ impl Default for RuntimeState {
 
 struct AppState {
     runtime: Mutex<RuntimeState>,
+    lifecycle: Mutex<()>,
+    shutting_down: AtomicBool,
     usage_streaming: AtomicBool,
 }
 
@@ -115,9 +117,18 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             runtime: Mutex::new(RuntimeState::default()),
+            lifecycle: Mutex::new(()),
+            shutting_down: AtomicBool::new(false),
             usage_streaming: AtomicBool::new(false),
         }
     }
+}
+
+fn ensure_not_shutting_down(state: &AppState) -> Result<(), String> {
+    if state.shutting_down.load(Ordering::SeqCst) {
+        return Err("desktop is shutting down".to_string());
+    }
+    Ok(())
 }
 
 fn api_major_compatible(expected: &str, actual: &str) -> bool {
@@ -145,6 +156,14 @@ fn ownership_after_probe(external_found: bool, compatible: bool) -> Ownership {
         Ownership::External
     } else {
         Ownership::DesktopManaged
+    }
+}
+
+fn ownership_after_successful_probe(managed_running: bool) -> Ownership {
+    if managed_running {
+        Ownership::DesktopManaged
+    } else {
+        Ownership::External
     }
 }
 
@@ -402,17 +421,46 @@ fn attach_or_start_internal(
         .or_else(|| env::var("FMR_GATEWAY_ADDRESS").ok())
         .unwrap_or_else(|| DEFAULT_GATEWAY_ADDRESS.to_string());
     let address = normalize_address(&address_input)?;
-    let token = env::var("FMR_MANAGEMENT_TOKEN").unwrap_or_else(|_| random_token());
-
-    {
-        let runtime = state
+    let (managed_running, stored_token) = {
+        let mut runtime = state
             .runtime
             .lock()
             .map_err(|_| "desktop runtime lock is poisoned".to_string())?;
-        if runtime.child.is_some() && runtime.address == address && runtime.status.is_some() {
+        let mut running = false;
+        if let Some(child) = runtime.child.as_mut() {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    runtime.child = None;
+                    runtime.status = None;
+                }
+                Ok(None) => running = true,
+                Err(error) => {
+                    runtime.status = None;
+                    runtime.error = Some(format!("inspect managed gateway: {error}"));
+                    return Err(runtime.error.clone().unwrap_or_default());
+                }
+            }
+        }
+        if running
+            && runtime.address == address
+            && runtime.status.is_some()
+            && runtime.error.is_none()
+        {
             return Ok(shell_status(&runtime));
         }
-    }
+        if running && runtime.address != address {
+            return Err(format!(
+                "managed gateway is still running at {}; stop it before attaching to {address}",
+                runtime.address
+            ));
+        }
+        (running, runtime.token.clone())
+    };
+    let token = env::var("FMR_MANAGEMENT_TOKEN")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| (!stored_token.is_empty()).then_some(stored_token))
+        .unwrap_or_else(random_token);
 
     let probe = match http_json(&address, &token, "GET", "/_fmr/status", None) {
         Ok(value) => Some(value),
@@ -437,11 +485,19 @@ fn attach_or_start_internal(
             .map_err(|_| "desktop runtime lock is poisoned".to_string())?;
         runtime.address = address;
         runtime.token = token;
-        runtime.ownership = ownership_after_probe(true, true);
-        runtime.child = None;
+        runtime.ownership = ownership_after_successful_probe(managed_running);
+        if !managed_running {
+            runtime.child = None;
+        }
         runtime.status = Some(status);
         runtime.error = None;
         return Ok(shell_status(&runtime));
+    }
+    if managed_running {
+        return Err(
+            "managed gateway process is running but its control endpoint is unavailable"
+                .to_string(),
+        );
     }
 
     let sidecar = sidecar_path()?;
@@ -450,7 +506,7 @@ fn attach_or_start_internal(
     command
         .env("FMR_MANAGEMENT_TOKEN", &token)
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     if let Ok(config_path) = env::var("FMR_CONFIG_PATH") {
         if !config_path.trim().is_empty() {
             command.args(["-config", config_path.trim()]);
@@ -460,6 +516,7 @@ fn attach_or_start_internal(
     let mut child = command
         .spawn()
         .map_err(|error| format!("start managed gateway: {error}"))?;
+    let diagnostics = child.stderr.take().map(capture_startup_stderr);
     let deadline = Instant::now() + Duration::from_secs(20);
     let status = loop {
         if Instant::now() >= deadline {
@@ -469,14 +526,27 @@ fn attach_or_start_internal(
         }
         match http_json(&address, &token, "GET", "/_fmr/status", None) {
             Ok(value) => {
-                let status: GatewayStatus = serde_json::from_value(value)
-                    .map_err(|error| format!("decode managed gateway status: {error}"))?;
+                let status: GatewayStatus = match serde_json::from_value(value) {
+                    Ok(status) => status,
+                    Err(error) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(format!("decode managed gateway status: {error}"));
+                    }
+                };
                 break status;
             }
             Err(_) => {
                 if let Ok(Some(exit)) = child.try_wait() {
+                    let diagnostic = diagnostics
+                        .as_ref()
+                        .and_then(|receiver| receiver.recv_timeout(Duration::from_millis(500)).ok())
+                        .map(|bytes| classify_startup_stderr(&bytes))
+                        .unwrap_or_else(|| {
+                            "Gateway startup failed without diagnostics".to_string()
+                        });
                     return Err(format!(
-                        "managed gateway exited before becoming ready: {exit}"
+                        "managed gateway exited before becoming ready: {exit}. {diagnostic}"
                     ));
                 }
                 thread::sleep(Duration::from_millis(150));
@@ -503,6 +573,45 @@ fn attach_or_start_internal(
     runtime.status = Some(status);
     runtime.error = None;
     Ok(shell_status(&runtime))
+}
+
+fn capture_startup_stderr(mut stderr: impl Read + Send + 'static) -> mpsc::Receiver<Vec<u8>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        const LIMIT: usize = 64 * 1024;
+        let mut captured = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match stderr.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    if captured.len() < LIMIT {
+                        let keep = read.min(LIMIT - captured.len());
+                        captured.extend_from_slice(&buffer[..keep]);
+                    }
+                }
+            }
+        }
+        let _ = sender.send(captured);
+    });
+    receiver
+}
+
+fn classify_startup_stderr(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    if text.contains("credential") && text.contains("not configured") {
+        return "A configured provider credential is unavailable; re-enter its API key or disable that provider".to_string();
+    }
+    if text.contains("listen on") || text.contains("address already in use") {
+        return "A gateway port is still in use".to_string();
+    }
+    if text.contains("load config") || text.contains("config:") {
+        return "The saved gateway configuration was rejected".to_string();
+    }
+    if text.contains("discover") || text.contains("catalog") {
+        return "A provider catalog could not be loaded; check provider credentials and network access".to_string();
+    }
+    "Gateway startup failed; no sensitive sidecar output was exposed".to_string()
 }
 
 fn current_connection(state: &AppState) -> Result<(String, String), String> {
@@ -641,25 +750,53 @@ fn start_usage_stream(app: AppHandle, state: State<'_, AppState>) -> Result<(), 
 
 fn stop_managed(state: &AppState) -> Result<(), String> {
     state.usage_streaming.store(false, Ordering::Release);
+    let mut child = {
+        let mut runtime = state
+            .runtime
+            .lock()
+            .map_err(|_| "desktop runtime lock is poisoned".to_string())?;
+        if !should_stop(runtime.ownership) {
+            runtime.child = None;
+            runtime.status = None;
+            runtime.error = None;
+            return Ok(());
+        }
+        runtime.status = None;
+        runtime.child.take()
+    };
+    if let Some(mut process) = child.take() {
+        if let Err(kill_error) = process.kill() {
+            match process.try_wait() {
+                Ok(Some(_)) => {}
+                _ => {
+                    let mut runtime = state
+                        .runtime
+                        .lock()
+                        .map_err(|_| "desktop runtime lock is poisoned".to_string())?;
+                    runtime.child = Some(process);
+                    runtime.error = Some(format!("stop managed gateway: {kill_error}"));
+                    return Err(runtime.error.clone().unwrap_or_default());
+                }
+            }
+        } else if let Err(wait_error) = process.wait() {
+            match process.try_wait() {
+                Ok(Some(_)) => {}
+                _ => {
+                    let mut runtime = state
+                        .runtime
+                        .lock()
+                        .map_err(|_| "desktop runtime lock is poisoned".to_string())?;
+                    runtime.child = Some(process);
+                    runtime.error = Some(format!("wait for managed gateway: {wait_error}"));
+                    return Err(runtime.error.clone().unwrap_or_default());
+                }
+            }
+        }
+    }
     let mut runtime = state
         .runtime
         .lock()
         .map_err(|_| "desktop runtime lock is poisoned".to_string())?;
-    if should_stop(runtime.ownership) {
-        if let Some(mut child) = runtime.child.take() {
-            if let Err(error) = child.kill() {
-                runtime.child = Some(child);
-                return Err(format!("stop managed gateway: {error}"));
-            }
-            if let Err(error) = child.wait() {
-                runtime.child = None;
-                runtime.status = None;
-                return Err(format!("wait for managed gateway: {error}"));
-            }
-        }
-    } else {
-        runtime.child = None;
-    }
     runtime.status = None;
     runtime.error = None;
     Ok(())
@@ -748,11 +885,18 @@ fn desktop_status(state: State<'_, AppState>) -> Result<ShellStatus, String> {
 }
 
 #[tauri::command]
-fn attach_or_start(
-    state: State<'_, AppState>,
-    address: Option<String>,
-) -> Result<ShellStatus, String> {
-    attach_or_start_internal(&state, address)
+async fn attach_or_start(app: AppHandle, address: Option<String>) -> Result<ShellStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _lifecycle = state
+            .lifecycle
+            .lock()
+            .map_err(|_| "desktop lifecycle lock is poisoned".to_string())?;
+        ensure_not_shutting_down(&state)?;
+        attach_or_start_internal(&state, address)
+    })
+    .await
+    .map_err(|error| format!("desktop lifecycle task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -806,53 +950,64 @@ fn gateway_config(state: State<'_, AppState>) -> Result<Value, String> {
 }
 
 #[tauri::command]
-fn update_gateway_config(state: State<'_, AppState>, request: Value) -> Result<Value, String> {
-    let managed = {
-        let runtime = state
-            .runtime
+async fn update_gateway_config(app: AppHandle, request: Value) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _lifecycle = state
+            .lifecycle
             .lock()
-            .map_err(|_| "desktop runtime lock is poisoned".to_string())?;
-        runtime.ownership == Ownership::DesktopManaged
-    };
-    let mut response = control_request(&state, "PUT", "/_fmr/config", Some(&request))?;
-    if let Some(object) = response.as_object_mut() {
-        object.insert("saved".to_string(), Value::Bool(true));
-    }
-    if managed {
-        let activation = stop_managed(&state).and_then(|_| attach_or_start_internal(&state, None));
+            .map_err(|_| "desktop lifecycle lock is poisoned".to_string())?;
+        ensure_not_shutting_down(&state)?;
+        let managed = {
+            let runtime = state
+                .runtime
+                .lock()
+                .map_err(|_| "desktop runtime lock is poisoned".to_string())?;
+            runtime.ownership == Ownership::DesktopManaged
+        };
+        let mut response = control_request(&state, "PUT", "/_fmr/config", Some(&request))?;
         if let Some(object) = response.as_object_mut() {
-            match activation {
-                Ok(_) => {
-                    object.insert("restarted".to_string(), Value::Bool(true));
-                    object.insert("restartRequired".to_string(), Value::Bool(false));
-                    object.insert(
-                        "activationState".to_string(),
-                        Value::String("running".to_string()),
-                    );
-                }
-                Err(error) => {
-                    if let Ok(mut runtime) = state.runtime.lock() {
-                        runtime.error = Some(error.clone());
+            object.insert("saved".to_string(), Value::Bool(true));
+        }
+        if managed {
+            let activation =
+                stop_managed(&state).and_then(|_| attach_or_start_internal(&state, None));
+            if let Some(object) = response.as_object_mut() {
+                match activation {
+                    Ok(_) => {
+                        object.insert("restarted".to_string(), Value::Bool(true));
+                        object.insert("restartRequired".to_string(), Value::Bool(false));
+                        object.insert(
+                            "activationState".to_string(),
+                            Value::String("running".to_string()),
+                        );
                     }
-                    object.insert("restarted".to_string(), Value::Bool(false));
-                    object.insert("restartRequired".to_string(), Value::Bool(true));
-                    object.insert(
-                        "activationState".to_string(),
-                        Value::String("start-failed".to_string()),
-                    );
-                    object.insert("restartError".to_string(), Value::String(error));
+                    Err(error) => {
+                        if let Ok(mut runtime) = state.runtime.lock() {
+                            runtime.error = Some(error.clone());
+                        }
+                        object.insert("restarted".to_string(), Value::Bool(false));
+                        object.insert("restartRequired".to_string(), Value::Bool(true));
+                        object.insert(
+                            "activationState".to_string(),
+                            Value::String("start-failed".to_string()),
+                        );
+                        object.insert("restartError".to_string(), Value::String(error));
+                    }
                 }
             }
+        } else if let Some(object) = response.as_object_mut() {
+            object.insert("restarted".to_string(), Value::Bool(false));
+            object.insert("restartRequired".to_string(), Value::Bool(true));
+            object.insert(
+                "activationState".to_string(),
+                Value::String("external-restart-required".to_string()),
+            );
         }
-    } else if let Some(object) = response.as_object_mut() {
-        object.insert("restarted".to_string(), Value::Bool(false));
-        object.insert("restartRequired".to_string(), Value::Bool(true));
-        object.insert(
-            "activationState".to_string(),
-            Value::String("external-restart-required".to_string()),
-        );
-    }
-    Ok(response)
+        Ok(response)
+    })
+    .await
+    .map_err(|error| format!("desktop lifecycle task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -874,8 +1029,23 @@ fn set_autostart(enabled: bool) -> Result<bool, String> {
 }
 
 #[tauri::command]
-fn shutdown(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    stop_managed(&state)?;
+async fn shutdown(app: AppHandle) -> Result<(), String> {
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = worker_app.state::<AppState>();
+        let _lifecycle = state
+            .lifecycle
+            .lock()
+            .map_err(|_| "desktop lifecycle lock is poisoned".to_string())?;
+        state.shutting_down.store(true, Ordering::SeqCst);
+        if let Err(error) = stop_managed(&state) {
+            state.shutting_down.store(false, Ordering::SeqCst);
+            return Err(error);
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| format!("desktop lifecycle task failed: {error}"))??;
     app.exit(0);
     Ok(())
 }
@@ -918,9 +1088,19 @@ fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         "quit" => {
-            let state = app.state::<AppState>();
-            let _ = stop_managed(&state);
-            app.exit(0);
+            let worker_app = app.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let state = worker_app.state::<AppState>();
+                if let Ok(_lifecycle) = state.lifecycle.lock() {
+                    state.shutting_down.store(true, Ordering::SeqCst);
+                    if stop_managed(&state).is_ok() {
+                        drop(_lifecycle);
+                        worker_app.exit(0);
+                    } else {
+                        state.shutting_down.store(false, Ordering::SeqCst);
+                    }
+                };
+            });
         }
         _ => {}
     })
@@ -939,12 +1119,23 @@ fn main() {
         .manage(AppState::default())
         .setup(|app| {
             setup_tray(app.handle())?;
-            let state = app.state::<AppState>();
-            if let Err(error) = attach_or_start_internal(&state, None) {
-                if let Ok(mut runtime) = state.runtime.lock() {
-                    runtime.error = Some(error);
+            let worker_app = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let state = worker_app.state::<AppState>();
+                let result = state
+                    .lifecycle
+                    .lock()
+                    .map_err(|_| "desktop lifecycle lock is poisoned".to_string())
+                    .and_then(|_lifecycle| {
+                        ensure_not_shutting_down(&state)?;
+                        attach_or_start_internal(&state, None)
+                    });
+                if let Err(error) = result {
+                    if let Ok(mut runtime) = state.runtime.lock() {
+                        runtime.error = Some(error);
+                    }
                 }
-            }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1038,6 +1229,22 @@ mod tests {
         );
         assert!(should_stop(Ownership::DesktopManaged));
         assert!(!should_stop(Ownership::External));
+        assert_eq!(
+            ownership_after_successful_probe(true),
+            Ownership::DesktopManaged
+        );
+        assert_eq!(ownership_after_successful_probe(false), Ownership::External);
+    }
+
+    #[test]
+    fn lifecycle_rejects_new_work_after_shutdown_begins() {
+        let state = AppState::default();
+        assert!(ensure_not_shutting_down(&state).is_ok());
+        state.shutting_down.store(true, Ordering::SeqCst);
+        assert_eq!(
+            ensure_not_shutting_down(&state).unwrap_err(),
+            "desktop is shutting down"
+        );
     }
 
     #[test]
@@ -1057,6 +1264,23 @@ mod tests {
         assert!(is_auth_failure("gateway returned HTTP 401"));
         assert!(is_auth_failure("gateway returned HTTP 403"));
         assert!(!is_auth_failure("connect to gateway: refused"));
+    }
+
+    #[test]
+    fn startup_diagnostics_are_classified_without_exposing_raw_secrets() {
+        let diagnostic = classify_startup_stderr(
+            b"FMR exited: discover vendor: credential \"provider.vendor.4\" is not configured api-key-secret",
+        );
+        assert!(diagnostic.contains("credential is unavailable"));
+        assert!(!diagnostic.contains("provider.vendor.4"));
+        assert!(!diagnostic.contains("api-key-secret"));
+    }
+
+    #[test]
+    fn startup_diagnostics_tolerate_invalid_utf8() {
+        let diagnostic =
+            classify_startup_stderr(&[0xff, 0xfe, b'c', b'a', b't', b'a', b'l', b'o', b'g']);
+        assert!(diagnostic.contains("catalog could not be loaded"));
     }
 
     #[test]

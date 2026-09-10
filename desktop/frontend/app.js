@@ -2,7 +2,7 @@ const tauriInvoke = window.__TAURI__?.core?.invoke;
 const tauriListen = window.__TAURI__?.event?.listen;
 const app = document.getElementById("app");
 const state = {
-  status: null, providers: [], models: [], pool: null, logs: [], error: "",
+  status: null, providers: [], models: [], pool: null, logs: [], benchmark: null, error: "",
   searchQuery: "", modelFilters: { provider: "", access: "", status: "all", capability: "" },
   logFilters: { provider: "", result: "", model: "" }, expandedLog: "",
   activeTab: "provider", config: null, configDraft: null, configBaseRevision: 0, configDirty: false, configSaving: false,
@@ -11,7 +11,7 @@ const state = {
 // Provider credentials are deliberately not placed in state: test hooks expose state
 // and a periodic render must never write a replacement secret back into HTML.
 const providerSecretChanges = new Map();
-if (window.__FMR_TEST__) Object.assign(window.__FMR_TEST__, { state, visibleModels: () => visibleModels(), visibleLogs: () => visibleLogs(), modelMetric: (model, key) => modelMetric(model, key), acceptServerConfig, collectProviders: () => collectProviders() });
+if (window.__FMR_TEST__) Object.assign(window.__FMR_TEST__, { state, visibleModels: () => visibleModels(), visibleLogs: () => visibleLogs(), modelMetric: (model, key) => modelMetric(model, key), modelRows, acceptServerConfig, collectProviders: () => collectProviders(), providerCards, updateSelection });
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>\"']/g, (character) => ({
@@ -49,15 +49,17 @@ function providerCards() {
   if (!providers.length) return `<div class="empty">No providers configured.</div>`;
   return providers.map((provider) => {
     const summary = summaries.get(provider.id) || {};
+    const availabilityError = summary.available === false ? `<p class="provider-error">${escapeHtml(summary.message || summary.errorCode || "Provider unavailable")}</p>` : "";
     return `<fieldset class="provider-editor" data-provider-key="${escapeHtml(provider.clientKey)}"><legend>${escapeHtml(provider.name || provider.id)}</legend><div class="form-grid">
       <label>ID<input data-field="id" value="${escapeHtml(provider.id)}" ${provider.id === "opencode" ? "readonly" : ""}></label>
       <label>Name<input data-field="name" value="${escapeHtml(provider.name)}"></label>
       <label class="wide">Base URL<input data-field="baseUrl" value="${escapeHtml(provider.baseUrl)}"></label>
       <label>Protocol<select data-field="protocol"><option value="openai-compatible">OpenAI compatible</option></select></label>
       <label class="checkbox"><input data-field="enabled" type="checkbox" ${provider.enabled ? "checked" : ""}> Enabled</label>
+      ${provider.id === "opencode" ? "" : `<label class="checkbox"><input data-field="autoProbe" type="checkbox" ${provider.autoProbe ? "checked" : ""}> Automatic TTFT probes</label>`}
       <label>API key<input data-field="apiKey" type="password" placeholder="${provider.hasCredential ? "Configured — enter to replace" : "Optional"}" autocomplete="new-password"></label>
       <label class="checkbox"><input data-field="clearKey" type="checkbox"> Clear key</label>
-    </div><div class="muted">${summary.models ?? 0} models · ${summary.routes ?? 0} routes</div>${provider.id === "opencode" ? "" : `<button class="danger" data-remove-provider="${escapeHtml(provider.clientKey)}">Remove</button>`}</fieldset>`;
+    </div><div class="muted">${summary.models ?? 0} models · ${summary.routes ?? 0} routes</div>${provider.id === "opencode" ? "" : `<p class="muted">Compatible-provider models are enabled by default. Automatic probes can consume quota or incur provider charges.</p>`}${availabilityError}${provider.id === "opencode" ? "" : `<button class="danger" data-remove-provider="${escapeHtml(provider.clientKey)}">Remove</button>`}</fieldset>`;
   }).join("");
 }
 
@@ -66,7 +68,7 @@ function newClientKey() {
 }
 
 function cloneProvider(provider) {
-  return { id: provider.id || "", name: provider.name || "", protocol: provider.protocol || "openai-compatible", baseUrl: provider.baseUrl || "", enabled: provider.enabled !== false, hasCredential: Boolean(provider.hasCredential), clientKey: provider.clientKey || newClientKey() };
+  return { id: provider.id || "", name: provider.name || "", protocol: provider.protocol || "openai-compatible", baseUrl: provider.baseUrl || "", enabled: provider.enabled !== false, hasCredential: Boolean(provider.hasCredential), autoProbe: provider.autoProbe !== false, excludedModelIds: [...(provider.excludedModelIds || [])], clientKey: provider.clientKey || newClientKey() };
 }
 
 function beginProviderDraft(config = state.config) {
@@ -181,15 +183,18 @@ function modelRows() {
     const performance = modelMetric(model, "performance");
     const latency = modelMetric(model, "latency");
     const score = modelMetric(model, "score");
-    return `<tr><td><label class="checkbox"><input type="checkbox" data-model-id="${escapeHtml(model.id)}" ${model.selected ? "checked" : ""} /> <code>${escapeHtml(model.id)}</code></label></td><td>${escapeHtml(model.displayName)}</td><td>${routes || "<span class=\"muted\">none</span>"}</td><td>${performance === null ? "-" : performance.toFixed(1)}</td><td title="${route?.ttftKnown ? `${Math.round(route.ttftMs)} ms TTFT` : "No TTFT measurement"}">${latency === null ? "-" : latency.toFixed(1)}</td><td><button class="secondary" data-pin-id="${escapeHtml(model.id)}">${model.pinned ? "Unpin" : "Pin"}</button></td><td>${score === null ? "-" : score.toFixed(1)}</td></tr>`;
+    const performanceTitle = route?.performanceKnown ? "OpenEvals benchmark" : (route?.performanceReason || "Performance unavailable");
+    const latencyTitle = route?.ttftKnown ? `${Math.round(route.ttftMs)} ms TTFT` : (route?.latencyReason || "No TTFT measurement");
+    const scoreTitle = model.routingScoreKnown ? "Current routing score" : (route?.scoreReason || "Routing score unavailable");
+    return `<tr><td><label class="checkbox"><input type="checkbox" data-model-id="${escapeHtml(model.id)}" ${model.selected ? "checked" : ""} /> <code>${escapeHtml(model.id)}</code></label></td><td>${escapeHtml(model.displayName)}</td><td>${routes || "<span class=\"muted\">none</span>"}</td><td title="${escapeHtml(performanceTitle)}">${performance === null ? "-" : performance.toFixed(1)}</td><td title="${escapeHtml(latencyTitle)}">${latency === null ? "-" : latency.toFixed(1)}</td><td><button class="secondary" data-pin-id="${escapeHtml(model.id)}">${model.pinned ? "Unpin" : "Pin"}</button></td><td title="${escapeHtml(scoreTitle)}">${score === null ? "-" : score.toFixed(1)}</td></tr>`;
   }).join("");
 }
 
 function modelView() {
   const rows = modelRows();
   const providers = [...new Set(state.models.flatMap((model) => (model.routes || []).map((route) => route.provider)))].sort();
-  return `<div class="toolbar"><div><h1>Model</h1><p>Pool revision: ${escapeHtml(state.pool?.revision ?? "-")} · Last refreshed: ${escapeHtml(state.fetchedAt || "-")}</p></div><button class="secondary" data-action="rediscover" title="Rediscover provider catalogs">🔃 Rediscover</button></div>
-    ${state.error ? `<p class="error">${escapeHtml(state.error)}</p>` : ""}
+  return `<div class="toolbar"><div><h1>Model</h1><p>Pool revision: ${escapeHtml(state.pool?.revision ?? "-")} · Last refreshed: ${escapeHtml(state.fetchedAt || "-")} · Benchmark: ${escapeHtml(state.benchmark?.state || "never-fetched")}</p></div><button class="secondary" data-action="rediscover" title="Rediscover provider catalogs">🔃 Rediscover</button></div>
+    ${state.error ? `<p class="error">${escapeHtml(state.error)}</p>` : ""}${state.notice ? `<p class="status-ready">${escapeHtml(state.notice)}</p>` : ""}
     <section class="card"><div class="filters"><input id="model-search" type="search" placeholder="Search models" value="${escapeHtml(state.searchQuery)}" /><select data-filter="provider"><option value="">All providers</option>${providers.map((provider) => `<option value="${escapeHtml(provider)}" ${state.modelFilters.provider === provider ? "selected" : ""}>${escapeHtml(provider)}</option>`).join("")}</select><select data-filter="access"><option value="">All access</option><option value="free" ${state.modelFilters.access === "free" ? "selected" : ""}>Free</option><option value="free-tier" ${state.modelFilters.access === "free-tier" ? "selected" : ""}>Free-tier</option><option value="paid" ${state.modelFilters.access === "paid" ? "selected" : ""}>Paid</option><option value="unknown" ${state.modelFilters.access === "unknown" ? "selected" : ""}>Unknown</option></select><select data-filter="status"><option value="all">All status</option><option value="selected" ${state.modelFilters.status === "selected" ? "selected" : ""}>Selected</option><option value="unselected" ${state.modelFilters.status === "unselected" ? "selected" : ""}>Unselected</option><option value="pinned" ${state.modelFilters.status === "pinned" ? "selected" : ""}>Pinned</option><option value="available" ${state.modelFilters.status === "available" ? "selected" : ""}>Available</option><option value="unavailable" ${state.modelFilters.status === "unavailable" ? "selected" : ""}>Unavailable</option></select><select data-filter="capability"><option value="">All capabilities</option><option value="streaming" ${state.modelFilters.capability === "streaming" ? "selected" : ""}>Streaming</option><option value="tools" ${state.modelFilters.capability === "tools" ? "selected" : ""}>Tools</option><option value="vision" ${state.modelFilters.capability === "vision" ? "selected" : ""}>Vision</option><option value="structuredOutput" ${state.modelFilters.capability === "structuredOutput" ? "selected" : ""}>Structured output</option><option value="reasoning" ${state.modelFilters.capability === "reasoning" ? "selected" : ""}>Reasoning</option></select><button class="secondary" data-action="refresh">Refresh</button></div><div class="actions"><button data-action="select-all">Select All</button><button class="secondary" data-action="clear-all">Clear All</button><button class="secondary" data-action="select-visible">Select Visible</button><button class="secondary" data-action="clear-visible">Clear Visible</button><button class="secondary" data-action="auto-select">Auto Select</button></div></section>
     <section class="card"><table><thead><tr><th>Selected / ID</th><th><button class="table-sort" data-sort="name">Name</button></th><th>Routes</th><th><button class="table-sort" data-sort="performance">Performance</button></th><th><button class="table-sort" data-sort="latency">Latency</button></th><th>Pin</th><th><button class="table-sort" data-sort="score">Routing score</button></th></tr></thead><tbody id="model-table-body">${rows || `<tr><td colspan="7" class="empty">No models match.</td></tr>`}</tbody></table></section>`;
 }
@@ -362,6 +367,7 @@ async function refreshModels() {
   try {
     const [models, pool] = await Promise.all([invoke("gateway_models"), invoke("gateway_pool")]);
     state.models = models.data || [];
+    state.benchmark = models.benchmark || null;
     state.pool = pool;
     state.fetchedAt = new Date().toLocaleTimeString();
     state.error = "";
@@ -376,6 +382,24 @@ async function refreshLogs() {
 }
 
 async function updateSelection(id, selected) {
+  if (state.configDirty) {
+    state.notice = "Save or discard provider edits before changing model selection.";
+    render();
+    return;
+  }
+  const model = state.models.find((candidate) => candidate.id === id);
+  const route = representativeRoute(model || {});
+  const provider = editableProviders().find((candidate) => candidate.id === route?.provider);
+  if (provider && provider.id !== "opencode" && route?.upstreamModelId) {
+    const excluded = new Set(provider.excludedModelIds || []);
+    if (selected) excluded.delete(route.upstreamModelId);
+    else excluded.add(route.upstreamModelId);
+    provider.excludedModelIds = [...excluded].sort();
+    markProviderDirty();
+    await saveConfig({ providers: collectProviders() });
+    await refreshModels();
+    return;
+  }
   await mutatePool({ select: selected ? [id] : [], deselect: selected ? [] : [id], selectAll: false, clearAll: false });
 }
 
@@ -394,7 +418,7 @@ async function refreshConfig() {
 
 function collectProviders() {
   return editableProviders().map((provider) => {
-    const update = { id: provider.id.trim(), name: provider.name.trim(), protocol: provider.protocol, baseUrl: provider.baseUrl.trim(), enabled: provider.enabled };
+    const update = { id: provider.id.trim(), name: provider.name.trim(), protocol: provider.protocol, baseUrl: provider.baseUrl.trim(), enabled: provider.enabled, autoProbe: provider.autoProbe, excludedModelIds: [...(provider.excludedModelIds || [])] };
     const secret = providerSecretChanges.get(provider.clientKey);
     if (secret?.clear) update.apiKey = "";
     else if (secret?.value) update.apiKey = secret.value;
@@ -406,7 +430,7 @@ function addProvider() {
   const providers = editableProviders();
   let suffix = providers.length + 1;
   while (providers.some((provider) => provider.id === `provider-${suffix}`)) suffix++;
-  providers.push({ id: `provider-${suffix}`, name: `Provider ${suffix}`, protocol: "openai-compatible", baseUrl: "https://example.com/v1", enabled: true, hasCredential: false, clientKey: newClientKey() });
+  providers.push({ id: `provider-${suffix}`, name: `Provider ${suffix}`, protocol: "openai-compatible", baseUrl: "https://example.com/v1", enabled: true, hasCredential: false, autoProbe: true, excludedModelIds: [], clientKey: newClientKey() });
   markProviderDirty();
   renderProviderCards();
 }

@@ -198,6 +198,25 @@ test("provider secrets remain outside the frontend state", () => {
   assert.doesNotMatch(source, /configDraft[^\n]*apiKey/);
 });
 
+test("unavailable provider cards remain visible with escaped availability errors", () => {
+  const document = createDocument();
+  const source = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
+  const hooks = {};
+  vm.runInNewContext(source, { console, document, URLSearchParams, setInterval() {}, window: { __FMR_TEST__: hooks, __TAURI__: { core: { invoke: async () => ({ data: [] }) } }, location: { search: "" } } }, { filename: "app.js" });
+  hooks.state.config = { providers: [
+    { id: "opencode", name: "OpenCode", protocol: "openai-compatible", baseUrl: "http://localhost", enabled: true, clientKey: "opencode" },
+    { id: "openrouter", name: "OpenRouter", protocol: "openai-compatible", baseUrl: "https://example.com", enabled: true, clientKey: "openrouter" }
+  ] };
+  hooks.state.providers = [{ id: "openrouter", available: false, errorCode: "provider_unavailable", message: "Configured &lt;message&gt;" }];
+
+  const html = hooks.providerCards();
+  assert.match(html, /OpenCode/);
+  assert.match(html, /OpenRouter/);
+  assert.match(html, /provider-error/);
+  assert.match(html, /Configured &amp;lt;message&amp;gt;/);
+  assert.doesNotMatch(html, /Configured &lt;message&gt;<\/p>/);
+});
+
 test("older config refresh cannot replace an acknowledged provider configuration", () => {
   const document = createDocument();
   const source = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
@@ -214,4 +233,62 @@ test("provider save validation requires an enabled provider", () => {
   const source = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
   assert.match(source, /providers\.some\(\(provider\) => provider\.enabled\)/);
   assert.match(source, /At least one provider must be enabled/);
+});
+
+test("generic model deselection persists an exact provider exclusion", async () => {
+  const document = createDocument();
+  const source = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
+  const hooks = {};
+  let savedRequest;
+  const provider = { id: "custom", name: "Custom", protocol: "openai-compatible", baseUrl: "https://example.test/v1", enabled: true, autoProbe: true, excludedModelIds: [] };
+  const invoke = async (command, args) => {
+    if (command === "update_gateway_config") {
+      savedRequest = args.request;
+      return { config: { revision: 3, bind: "127.0.0.1:8787", providers: args.request.providers }, restarted: true, activationState: "running" };
+    }
+    if (command === "desktop_status") return { ready: false };
+    if (command === "gateway_models") return { data: [] };
+    if (command === "gateway_pool") return { revision: 1, mode: "Manual", selectedProviderModelIds: [] };
+    return { data: [] };
+  };
+  vm.runInNewContext(source, { console, document, URLSearchParams, setInterval() {}, window: { __FMR_TEST__: hooks, __TAURI__: { core: { invoke } }, location: { search: "" } } }, { filename: "app.js" });
+  hooks.acceptServerConfig({ revision: 2, bind: "127.0.0.1:8787", providers: [provider] });
+  hooks.state.models = [{ id: "custom/model-a", selected: true, routes: [{ provider: "custom", upstreamModelId: "vendor/model-a", enabled: true }] }];
+  await hooks.updateSelection("custom/model-a", false);
+  assert.deepEqual(JSON.parse(JSON.stringify(savedRequest.providers[0].excludedModelIds)), ["vendor/model-a"]);
+  assert.equal(savedRequest.providers[0].autoProbe, true);
+});
+
+test("dirty provider edits block model selection without persisting exclusions", async () => {
+  const document = createDocument();
+  const source = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
+  const hooks = {};
+  let updateCalls = 0;
+  const invoke = async (command) => {
+    if (command === "update_gateway_config") updateCalls++;
+    return command === "desktop_status" ? { ready: false } : { data: [] };
+  };
+  vm.runInNewContext(source, { console, document, URLSearchParams, setInterval() {}, window: { __FMR_TEST__: hooks, __TAURI__: { core: { invoke } }, location: { search: "" } } }, { filename: "app.js" });
+  hooks.state.activeTab = "model";
+  hooks.state.configDirty = true;
+  hooks.state.configDraft = [{ id: "custom", excludedModelIds: [] }];
+  hooks.state.models = [{ id: "custom/model-a", selected: true, routes: [{ provider: "custom", upstreamModelId: "vendor/model-a" }] }];
+
+  await hooks.updateSelection("custom/model-a", false);
+
+  assert.equal(updateCalls, 0);
+  assert.deepEqual(hooks.state.configDraft[0].excludedModelIds, []);
+  assert.match(document.app.innerHTML, /Save or discard provider edits before changing model selection\./);
+});
+
+test("unknown metrics render deterministic diagnostic reasons", () => {
+  const document = createDocument();
+  const source = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
+  const hooks = {};
+  vm.runInNewContext(source, { console, document, URLSearchParams, setInterval() {}, window: { __FMR_TEST__: hooks, __TAURI__: { core: { invoke: async () => ({ data: [] }) } }, location: { search: "" } } }, { filename: "app.js" });
+  hooks.state.models = [{ id: "custom/model", displayName: "Model", selected: true, routingScoreKnown: false, routes: [{ provider: "custom", access: "Unknown", enabled: true, performanceKnown: false, performanceReason: "no_unique_match", ttftKnown: false, latencyReason: "no_sample", routingScoreKnown: false, scoreReason: "no_performance_and_latency" }] }];
+  const rows = hooks.modelRows();
+  assert.match(rows, /title="no_unique_match">-/);
+  assert.match(rows, /title="no_sample">-/);
+  assert.match(rows, /title="no_performance_and_latency">-/);
 });
