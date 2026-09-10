@@ -62,3 +62,18 @@ func TestPaidNeverProbed(t *testing.T) {
 		t.Fatal("paid routes must never be auto-probed")
 	}
 }
+
+func TestUnknownGenericRouteUsesExplicitProbePolicy(t *testing.T) {
+	h := health.New()
+	id, _ := model.NewProviderModelID("generic", "m")
+	catalog := &model.CatalogSnapshot{Revision: 1, Models: map[model.ProviderModelID]model.ProviderModel{id: {ID: id, UpstreamID: "m"}}}
+	allowed := true
+	routes := map[model.ProviderModelID][]model.ProviderRoute{id: {{ID: "generic::m", ModelID: id, Provider: "generic", UpstreamModelID: "m", Access: model.AccessUnknown, Enabled: true, ProbeAllowed: &allowed}}}
+	if targets := EligibleTargets(catalog, []model.ProviderModelID{id}, routes, h); len(targets) != 1 {
+		t.Fatalf("explicitly allowed generic route targets = %#v", targets)
+	}
+	allowed = false
+	if targets := EligibleTargets(catalog, []model.ProviderModelID{id}, routes, h); len(targets) != 0 {
+		t.Fatalf("probe-disabled generic route targets = %#v", targets)
+	}
+}

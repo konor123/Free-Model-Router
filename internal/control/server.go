@@ -100,6 +100,7 @@ func (s *Server) handleProviders(w http.ResponseWriter, _ *http.Request) {
 	for _, provider := range snapshot.Providers {
 		data = append(data, ProviderResponse{
 			ID: provider.ID, Models: provider.Models, Routes: provider.Routes, Enabled: provider.Enabled,
+			Available: provider.Available, ErrorCode: provider.ErrorCode, Message: provider.Message,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": data})
@@ -128,14 +129,16 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 			}
 			available := !route.Health.QuotaExhausted && (route.Health.CoolingUntil.IsZero() || time.Now().After(route.Health.CoolingUntil))
 			modelResponse.Routes = append(modelResponse.Routes, RouteResponse{
-				ID:              string(route.ID),
-				ModelID:         string(route.ModelID),
-				Provider:        route.Provider,
-				UpstreamModelID: route.UpstreamModelID,
-				CredentialID:    route.CredentialID,
-				Access:          route.Access,
-				Enabled:         route.Enabled,
-				Capabilities:    route.Capabilities,
+				ID:               string(route.ID),
+				ModelID:          string(route.ModelID),
+				Provider:         route.Provider,
+				UpstreamModelID:  route.UpstreamModelID,
+				CredentialID:     route.CredentialID,
+				Access:           route.Access,
+				Enabled:          route.Enabled,
+				AutoRouteAllowed: route.AutoRouteAllowed,
+				ProbeAllowed:     route.ProbeAllowed,
+				Capabilities:     route.Capabilities,
 				Health: RouteHealthResponse{
 					CoolingUntil: coolingUntil, QuotaExhausted: route.Health.QuotaExhausted,
 					ConsecutiveFailures: route.Health.ConsecutiveFailures, Available: available,
@@ -144,11 +147,12 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 				Performance: route.Performance, PerformanceKnown: route.PerformanceKnown, EffectivePerformance: route.EffectivePerformance,
 				Confidence: route.Confidence, LatencyScore: route.LatencyScore,
 				RoutingScore: route.RoutingScore, RoutingScoreKnown: route.RoutingScoreKnown,
+				PerformanceReason: route.PerformanceReason, LatencyReason: route.LatencyReason, ScoreReason: route.ScoreReason,
 			})
 		}
 		data = append(data, modelResponse)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"catalogRevision": snapshot.CatalogRevision, "data": data})
+	writeJSON(w, http.StatusOK, map[string]any{"catalogRevision": snapshot.CatalogRevision, "data": data, "benchmark": snapshot.Benchmark})
 }
 
 type catalogRefresher interface{ RefreshCatalog(context.Context) error }

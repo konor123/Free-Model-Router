@@ -67,21 +67,25 @@ type Options struct {
 
 // StatusResponse is the desktop attach/version handshake.
 type StatusResponse struct {
-	APIVersion      string   `json:"apiVersion"`
-	BuildVersion    string   `json:"buildVersion"`
-	InstanceID      string   `json:"instanceId"`
-	Features        []string `json:"features"`
-	CatalogRevision int64    `json:"catalogRevision"`
-	PoolRevision    int64    `json:"poolRevision"`
-	PinnedModel     string   `json:"pinnedModel,omitempty"`
+	APIVersion      string                  `json:"apiVersion"`
+	BuildVersion    string                  `json:"buildVersion"`
+	InstanceID      string                  `json:"instanceId"`
+	Features        []string                `json:"features"`
+	CatalogRevision int64                   `json:"catalogRevision"`
+	PoolRevision    int64                   `json:"poolRevision"`
+	PinnedModel     string                  `json:"pinnedModel,omitempty"`
+	Benchmark       gateway.BenchmarkStatus `json:"benchmark"`
 }
 
 // ProviderResponse is a safe provider summary.
 type ProviderResponse struct {
-	ID      string `json:"id"`
-	Models  int    `json:"models"`
-	Routes  int    `json:"routes"`
-	Enabled bool   `json:"enabled"`
+	ID        string `json:"id"`
+	Models    int    `json:"models"`
+	Routes    int    `json:"routes"`
+	Enabled   bool   `json:"enabled"`
+	Available bool   `json:"available"`
+	ErrorCode string `json:"errorCode,omitempty"`
+	Message   string `json:"message,omitempty"`
 }
 
 // RouteResponse is a safe route detail with no credentials.
@@ -93,6 +97,8 @@ type RouteResponse struct {
 	CredentialID         string              `json:"credentialId,omitempty"`
 	Access               model.AccessClass   `json:"access"`
 	Enabled              bool                `json:"enabled"`
+	AutoRouteAllowed     bool                `json:"autoRouteAllowed"`
+	ProbeAllowed         bool                `json:"probeAllowed"`
 	Capabilities         model.Capabilities  `json:"capabilities"`
 	Health               RouteHealthResponse `json:"health"`
 	TTFTMs               float64             `json:"ttftMs,omitempty"`
@@ -104,6 +110,9 @@ type RouteResponse struct {
 	LatencyScore         float64             `json:"latencyScore,omitempty"`
 	RoutingScore         float64             `json:"routingScore,omitempty"`
 	RoutingScoreKnown    bool                `json:"routingScoreKnown"`
+	PerformanceReason    string              `json:"performanceReason,omitempty"`
+	LatencyReason        string              `json:"latencyReason,omitempty"`
+	ScoreReason          string              `json:"scoreReason,omitempty"`
 }
 
 // RouteHealthResponse is the JSON-safe health status for one route.
@@ -152,23 +161,27 @@ type ConfigResponse struct {
 // ProviderConfigResponse is safe for display and never includes a credential
 // value or its backing SecretStore reference.
 type ProviderConfigResponse struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	Protocol      string `json:"protocol"`
-	BaseURL       string `json:"baseUrl"`
-	Enabled       bool   `json:"enabled"`
-	HasCredential bool   `json:"hasCredential"`
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	Protocol         string   `json:"protocol"`
+	BaseURL          string   `json:"baseUrl"`
+	Enabled          bool     `json:"enabled"`
+	HasCredential    bool     `json:"hasCredential"`
+	AutoProbe        bool     `json:"autoProbe"`
+	ExcludedModelIDs []string `json:"excludedModelIds,omitempty"`
 }
 
 // ProviderConfigUpdate carries desired provider state. APIKey is write-only:
 // nil keeps the current key, empty clears it, and a value replaces it.
 type ProviderConfigUpdate struct {
-	ID       string  `json:"id"`
-	Name     string  `json:"name"`
-	Protocol string  `json:"protocol"`
-	BaseURL  string  `json:"baseUrl"`
-	Enabled  bool    `json:"enabled"`
-	APIKey   *string `json:"apiKey,omitempty"`
+	ID               string    `json:"id"`
+	Name             string    `json:"name"`
+	Protocol         string    `json:"protocol"`
+	BaseURL          string    `json:"baseUrl"`
+	Enabled          bool      `json:"enabled"`
+	APIKey           *string   `json:"apiKey,omitempty"`
+	AutoProbe        *bool     `json:"autoProbe,omitempty"`
+	ExcludedModelIDs *[]string `json:"excludedModelIds,omitempty"`
 }
 
 // ConfigUpdateRequest replaces desktop-editable settings optimistically.
@@ -206,6 +219,7 @@ func (o Options) Status(snapshot gateway.ControlSnapshot) StatusResponse {
 		CatalogRevision: int64(snapshot.CatalogRevision),
 		PoolRevision:    snapshot.Pool.Revision,
 		PinnedModel:     string(snapshot.PinnedModel),
+		Benchmark:       snapshot.Benchmark,
 	}
 }
 

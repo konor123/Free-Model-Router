@@ -12,6 +12,48 @@ import (
 
 const routingTTFTMaxAge = 90 * time.Second
 
+// BenchmarkStatus is a non-sensitive runtime view of benchmark availability.
+type BenchmarkStatus struct {
+	State         string    `json:"state"`
+	Source        string    `json:"source,omitempty"`
+	LastAttemptAt time.Time `json:"lastAttemptAt,omitempty"`
+	LastSuccessAt time.Time `json:"lastSuccessAt,omitempty"`
+	RecordCount   int       `json:"recordCount"`
+	ErrorCode     string    `json:"errorCode,omitempty"`
+}
+
+// MarkBenchmarkFetching records a bounded live refresh attempt.
+func (g *Gateway) MarkBenchmarkFetching(now time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.benchmarkStatus.State = "fetching"
+	g.benchmarkStatus.LastAttemptAt = now
+	g.benchmarkStatus.ErrorCode = ""
+}
+
+// MarkBenchmarkFailure preserves the last-known-good snapshot while exposing a safe code.
+func (g *Gateway) MarkBenchmarkFailure(now time.Time, code string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.benchmarkStatus.State = "failed"
+	g.benchmarkStatus.LastAttemptAt = now
+	g.benchmarkStatus.ErrorCode = code
+}
+
+// SetBenchmarkSource records provenance after SetBenchmarkSnapshot succeeds.
+func (g *Gateway) SetBenchmarkSource(source string, now time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.benchmarkStatus = BenchmarkStatus{State: source, Source: source, LastAttemptAt: now, LastSuccessAt: now, RecordCount: len(g.benchmarkSnapshot.Models)}
+}
+
+// BenchmarkStatus returns a defensive runtime status snapshot.
+func (g *Gateway) BenchmarkStatus() BenchmarkStatus {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.benchmarkStatus
+}
+
 // SetBenchmarkSnapshot installs a validated benchmark snapshot for runtime
 // candidate ranking. Callers may pass the result of scoring.Cache.Resolve;
 // an empty snapshot remains the neutral, latency-only routing mode.

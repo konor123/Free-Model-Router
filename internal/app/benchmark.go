@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/konor123/Free-Model-Router/internal/benchmarks/openevals"
@@ -17,13 +18,18 @@ func startBenchmarkRefresh(ctx context.Context, gw *gateway.Gateway, cache *scor
 	if cached, err := cache.LoadLastKnownGood(); err == nil {
 		if err := gw.SetBenchmarkSnapshot(cached); err != nil && log != nil {
 			log.Warn("install benchmark cache: %v", err)
+		} else if err == nil {
+			gw.SetBenchmarkSource("cache", time.Now())
 		}
 	}
 	refresh := func() {
+		attemptedAt := time.Now()
+		gw.MarkBenchmarkFetching(attemptedAt)
 		fetchCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
 		snapshot, err := (openevals.Client{}).Fetch(fetchCtx)
 		if err != nil {
+			gw.MarkBenchmarkFailure(attemptedAt, benchmarkErrorCode(err))
 			if log != nil {
 				log.Warn("refresh OpenEvals benchmark: %v", err)
 			}
@@ -34,9 +40,14 @@ func startBenchmarkRefresh(ctx context.Context, gw *gateway.Gateway, cache *scor
 				log.Warn("save OpenEvals benchmark: %v", err)
 			}
 		}
-		if err := gw.SetBenchmarkSnapshot(snapshot); err != nil && log != nil {
-			log.Warn("install OpenEvals benchmark: %v", err)
+		if err := gw.SetBenchmarkSnapshot(snapshot); err != nil {
+			gw.MarkBenchmarkFailure(attemptedAt, "invalid_snapshot")
+			if log != nil {
+				log.Warn("install OpenEvals benchmark: %v", err)
+			}
+			return
 		}
+		gw.SetBenchmarkSource("live", time.Now())
 	}
 	go func() {
 		refresh()
@@ -51,4 +62,14 @@ func startBenchmarkRefresh(ctx context.Context, gw *gateway.Gateway, cache *scor
 			}
 		}
 	}()
+}
+
+func benchmarkErrorCode(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "fetch_timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "fetch_canceled"
+	}
+	return "fetch_failed"
 }

@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 const OpenAICompatibleProtocol = "openai-compatible"
@@ -15,12 +16,14 @@ var providerIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 // ProviderConfig is the non-secret configuration for one upstream provider.
 // CredentialRef names a SecretStore entry; credential values never belong here.
 type ProviderConfig struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	Protocol      string `json:"protocol"`
-	BaseURL       string `json:"baseUrl"`
-	Enabled       bool   `json:"enabled"`
-	CredentialRef string `json:"credentialRef,omitempty"`
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	Protocol         string   `json:"protocol"`
+	BaseURL          string   `json:"baseUrl"`
+	Enabled          bool     `json:"enabled"`
+	CredentialRef    string   `json:"credentialRef,omitempty"`
+	AutoProbe        *bool    `json:"autoProbe,omitempty"`
+	ExcludedModelIDs []string `json:"excludedModelIds,omitempty"`
 }
 
 func defaultProviders() []ProviderConfig {
@@ -34,7 +37,28 @@ func defaultProviders() []ProviderConfig {
 }
 
 func cloneProviders(providers []ProviderConfig) []ProviderConfig {
-	return append([]ProviderConfig(nil), providers...)
+	out := append([]ProviderConfig(nil), providers...)
+	for i := range out {
+		if providers[i].AutoProbe != nil {
+			value := *providers[i].AutoProbe
+			out[i].AutoProbe = &value
+		}
+		out[i].ExcludedModelIDs = append([]string(nil), providers[i].ExcludedModelIDs...)
+	}
+	return out
+}
+
+// AutoProbeEnabled resolves the default for generic compatible providers.
+func (p ProviderConfig) AutoProbeEnabled() bool { return p.AutoProbe == nil || *p.AutoProbe }
+
+// ModelExcluded matches exact, case-sensitive upstream model identifiers.
+func (p ProviderConfig) ModelExcluded(upstreamID string) bool {
+	for _, excluded := range p.ExcludedModelIDs {
+		if excluded == upstreamID {
+			return true
+		}
+	}
+	return false
 }
 
 func validateProviders(providers []ProviderConfig) error {
@@ -72,6 +96,19 @@ func validateProviders(providers []ProviderConfig) error {
 			if revision == provider.CredentialRef || revision == "" || strings.Trim(revision, "0123456789") != "" {
 				return fmt.Errorf("config: provider %q has an invalid credential reference", provider.ID)
 			}
+		}
+		if len(provider.ExcludedModelIDs) > 512 {
+			return fmt.Errorf("config: provider %q has too many excluded models", provider.ID)
+		}
+		excluded := make(map[string]struct{}, len(provider.ExcludedModelIDs))
+		for _, modelID := range provider.ExcludedModelIDs {
+			if modelID == "" || len(modelID) > 512 || strings.IndexFunc(modelID, unicode.IsControl) >= 0 {
+				return fmt.Errorf("config: provider %q has an invalid excluded model id", provider.ID)
+			}
+			if _, exists := excluded[modelID]; exists {
+				return fmt.Errorf("config: provider %q has duplicate excluded model id %q", provider.ID, modelID)
+			}
+			excluded[modelID] = struct{}{}
 		}
 	}
 	return nil

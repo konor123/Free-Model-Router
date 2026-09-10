@@ -4,6 +4,7 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -56,11 +57,21 @@ func (r *Registry) DiscoverRoutedCatalog(ctx context.Context) (*provider.RoutedC
 		entry := r.entries[id]
 		snapshot, err := entry.Backend.DiscoverModels(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("discover %s: %w", id, err)
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+				return nil, fmt.Errorf("discover %s: %w", id, err)
+			}
+			availability, ok := degradedAvailability(id, err)
+			if !ok {
+				return nil, fmt.Errorf("discover %s: %w", id, err)
+			}
+			out.Providers = append(out.Providers, availability)
+			continue
 		}
 		if snapshot == nil {
 			return nil, fmt.Errorf("discover %s: nil catalog", id)
 		}
+		providerModels := make(map[model.ProviderModelID]model.ProviderModel)
+		providerRoutes := make(map[model.ProviderModelID][]model.ProviderRoute)
 		if snapshot.CreatedAt.After(out.Snapshot.CreatedAt) {
 			out.Snapshot.CreatedAt = snapshot.CreatedAt
 		}
@@ -87,11 +98,42 @@ func (r *Registry) DiscoverRoutedCatalog(ctx context.Context) (*provider.RoutedC
 					return nil, fmt.Errorf("route %q does not belong to %s", route.ID, modelID)
 				}
 			}
-			out.Snapshot.Models[modelID] = pm
-			out.Routes[modelID] = routes
+			providerModels[modelID] = pm
+			providerRoutes[modelID] = routes
 		}
+		for modelID, pm := range providerModels {
+			out.Snapshot.Models[modelID] = pm
+			out.Routes[modelID] = providerRoutes[modelID]
+		}
+		out.Providers = append(out.Providers, provider.ProviderAvailability{ID: id, Available: true})
 	}
 	return out, nil
+}
+
+func degradedAvailability(id string, err error) (provider.ProviderAvailability, bool) {
+	var failure *provider.FailureError
+	if !errors.As(err, &failure) || (failure.Failure.Scope != model.ScopeProvider && failure.Failure.Scope != model.ScopeCredential) {
+		return provider.ProviderAvailability{}, false
+	}
+	code := "PROVIDER_UNAVAILABLE"
+	message := "Provider catalog is temporarily unavailable"
+	switch failure.Failure.Class {
+	case model.FailureAuth:
+		code, message = "PROVIDER_AUTH_REJECTED", "Provider credentials were rejected"
+	case model.FailureRateLimited:
+		code, message = "PROVIDER_RATE_LIMITED", "Provider catalog request was rate limited"
+	case model.FailureTimeout:
+		code, message = "PROVIDER_DISCOVERY_TIMEOUT", "Provider catalog request timed out"
+	case model.FailureNetwork:
+		code, message = "PROVIDER_NETWORK_UNAVAILABLE", "Provider catalog could not be reached"
+	case model.FailureServerError:
+		code, message = "PROVIDER_UPSTREAM_UNAVAILABLE", "Provider catalog service is unavailable"
+	case model.FailureProtocol:
+		code, message = "PROVIDER_PROTOCOL_ERROR", "Provider returned an invalid catalog response"
+	default:
+		return provider.ProviderAvailability{}, false
+	}
+	return provider.ProviderAvailability{ID: id, ErrorCode: code, Message: message}, true
 }
 
 // DiscoverModels is the compatibility projection for callers that do not need routes.

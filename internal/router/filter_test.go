@@ -202,6 +202,19 @@ func TestUnknownAccessNeverAutoRoutes(t *testing.T) {
 	}
 }
 
+func TestUnknownAccessRoutesWithExplicitGenericPermission(t *testing.T) {
+	in, _ := buildFilter(t)
+	id := mustLookup(t, in, "unknown")
+	in.Pool = []model.ProviderModelID{id}
+	allowed := true
+	route := in.Routes[id][0]
+	route.AutoRouteAllowed = &allowed
+	in.Routes[id] = []model.ProviderRoute{route}
+	if result := Filter(in); len(result.Eligible) != 1 {
+		t.Fatalf("explicit generic permission did not route: %#v", result)
+	}
+}
+
 func TestFallbackKeepsSameRequirements(t *testing.T) {
 	// Simulate fallback: rerunning Filter with the identical input after a
 	// candidate failure must produce the same eligible set.

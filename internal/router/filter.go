@@ -117,7 +117,7 @@ func Filter(in FilterInput) EligibilityResult {
 				res.Excluded = append(res.Excluded, Exclusion{ID: id, Reason: "health unavailable"})
 				continue
 			}
-			if !routeAccessAllowed(route.EffectiveAccess(), in.AllowPaid, in.AllowUnknown) {
+			if !route.AllowsAutomaticRouting() && !routeAccessAllowed(route.EffectiveAccess(), in.AllowPaid, in.AllowUnknown) {
 				res.Excluded = append(res.Excluded, Exclusion{ID: id, Reason: "access not allowed"})
 				continue
 			}

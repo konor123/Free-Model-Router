@@ -287,7 +287,7 @@ func configView(cfg *config.Config, secrets *config.SecretStore) control.ConfigR
 		PinnedModel: cfg.PinnedModel, Revision: cfg.ConfigRevision,
 	}
 	for _, item := range cfg.Providers {
-		response.Providers = append(response.Providers, control.ProviderConfigResponse{ID: item.ID, Name: item.Name, Protocol: item.Protocol, BaseURL: item.BaseURL, Enabled: item.Enabled, HasCredential: item.CredentialRef != ""})
+		response.Providers = append(response.Providers, control.ProviderConfigResponse{ID: item.ID, Name: item.Name, Protocol: item.Protocol, BaseURL: item.BaseURL, Enabled: item.Enabled, HasCredential: item.CredentialRef != "", AutoProbe: item.AutoProbeEnabled(), ExcludedModelIDs: append([]string(nil), item.ExcludedModelIDs...)})
 	}
 	if secrets != nil {
 		if key, err := secrets.Get(config.InferenceTokenKey); err == nil && strings.TrimSpace(key) != "" {

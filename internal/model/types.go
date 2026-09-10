@@ -279,6 +279,31 @@ type ProviderRoute struct {
 
 	// Enabled is the user-facing enable/disable state of this route.
 	Enabled bool `json:"enabled"`
+	// Explicit generic-provider policy. Nil preserves legacy access-based rules.
+	AutoRouteAllowed *bool `json:"autoRouteAllowed,omitempty"`
+	ProbeAllowed     *bool `json:"probeAllowed,omitempty"`
+	DefaultSelected  *bool `json:"defaultSelected,omitempty"`
+}
+
+// AllowsAutomaticRouting resolves explicit user policy before legacy access rules.
+func (r ProviderRoute) AllowsAutomaticRouting() bool {
+	if r.AutoRouteAllowed != nil {
+		return *r.AutoRouteAllowed
+	}
+	return r.EffectiveAccess().AutoRoutable()
+}
+
+// AllowsProbe resolves explicit user policy before legacy access rules.
+func (r ProviderRoute) AllowsProbe() bool {
+	if r.ProbeAllowed != nil {
+		return *r.ProbeAllowed
+	}
+	return r.EffectiveAccess().Probeable()
+}
+
+// SelectedByDefault reports whether discovery should add this generic route.
+func (r ProviderRoute) SelectedByDefault() bool {
+	return r.DefaultSelected != nil && *r.DefaultSelected
 }
 
 // EffectiveCapabilities computes base ∩ route override.

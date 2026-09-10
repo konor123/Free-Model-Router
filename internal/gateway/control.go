@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/konor123/Free-Model-Router/internal/catalog"
 	"github.com/konor123/Free-Model-Router/internal/health"
@@ -40,6 +41,8 @@ type ControlRoute struct {
 	CredentialID         string                `json:"credentialId,omitempty"`
 	Access               model.AccessClass     `json:"access"`
 	Enabled              bool                  `json:"enabled"`
+	AutoRouteAllowed     bool                  `json:"autoRouteAllowed"`
+	ProbeAllowed         bool                  `json:"probeAllowed"`
 	Capabilities         model.Capabilities    `json:"capabilities"`
 	Health               health.RouteSnapshot  `json:"health"`
 	TTFTMs               float64               `json:"ttftMs,omitempty"`
@@ -51,6 +54,9 @@ type ControlRoute struct {
 	LatencyScore         float64               `json:"latencyScore,omitempty"`
 	RoutingScore         float64               `json:"routingScore,omitempty"`
 	RoutingScoreKnown    bool                  `json:"routingScoreKnown"`
+	PerformanceReason    string                `json:"performanceReason,omitempty"`
+	LatencyReason        string                `json:"latencyReason,omitempty"`
+	ScoreReason          string                `json:"scoreReason,omitempty"`
 }
 
 // ControlModel is a defensive model view with all route variants.
@@ -65,10 +71,13 @@ type ControlModel struct {
 
 // ControlProvider summarizes provider participation in the current catalog.
 type ControlProvider struct {
-	ID      string `json:"id"`
-	Models  int    `json:"models"`
-	Routes  int    `json:"routes"`
-	Enabled bool   `json:"enabled"`
+	ID        string `json:"id"`
+	Models    int    `json:"models"`
+	Routes    int    `json:"routes"`
+	Enabled   bool   `json:"enabled"`
+	Available bool   `json:"available"`
+	ErrorCode string `json:"errorCode,omitempty"`
+	Message   string `json:"message,omitempty"`
 }
 
 // ControlSnapshot is the read-only state boundary consumed by control API and
@@ -79,6 +88,7 @@ type ControlSnapshot struct {
 	PinnedModel     model.ProviderModelID   `json:"pinnedModel,omitempty"`
 	Models          []ControlModel          `json:"models"`
 	Providers       []ControlProvider       `json:"providers"`
+	Benchmark       BenchmarkStatus         `json:"benchmark"`
 }
 
 // ControlSnapshot returns a fully defensive snapshot. Callers may freely sort
@@ -90,7 +100,7 @@ func (g *Gateway) ControlSnapshot() ControlSnapshot {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
-	out := ControlSnapshot{PinnedModel: g.pinnedModel}
+	out := ControlSnapshot{PinnedModel: g.pinnedModel, Benchmark: g.benchmarkStatus}
 	if g.pool != nil {
 		if pool := g.pool.Snapshot(); pool != nil {
 			out.Pool = *pool
@@ -111,6 +121,9 @@ func (g *Gateway) ControlSnapshot() ControlSnapshot {
 	}
 	sort.Slice(ids, func(i, j int) bool { return string(ids[i]) < string(ids[j]) })
 	providers := map[string]*ControlProvider{}
+	for _, availability := range g.providers {
+		providers[availability.ID] = &ControlProvider{ID: availability.ID, Available: availability.Available, ErrorCode: availability.ErrorCode, Message: availability.Message}
+	}
 	latencyPopulation := make([]float64, 0)
 	for _, routes := range g.routes {
 		for _, route := range routes {
@@ -127,9 +140,12 @@ func (g *Gateway) ControlSnapshot() ControlSnapshot {
 		view := ControlModel{Model: pm, Selected: selected[id], Pinned: id == g.pinnedModel}
 		for _, route := range g.routes[id] {
 			caps := route.EffectiveCapabilities(pm.Base)
-			ttft, known := 0.0, false
+			ttft, known, stale := 0.0, false, false
 			if g.latency != nil {
-				ttft, known = g.latency.EffectiveTTFT(string(route.ID))
+				ttft, known = g.latency.FreshTTFT(string(route.ID), time.Now(), routingTTFTMaxAge)
+				if !known {
+					_, stale = g.latency.EffectiveTTFT(string(route.ID))
+				}
 			}
 			routeHealth := health.RouteSnapshot{}
 			if g.health != nil {
@@ -139,7 +155,8 @@ func (g *Gateway) ControlSnapshot() ControlSnapshot {
 			if known {
 				latencyScore = scoring.Percentile(ttft, latencyPopulation, false)
 			}
-			routeScore := scoring.ScoreBinding(g.benchmarkSnapshot, g.benchmarkBindings[id], latencyScore)
+			binding, bound := g.benchmarkBindings[id]
+			routeScore := scoring.ScoreBinding(g.benchmarkSnapshot, binding, latencyScore)
 			if !view.RoutingScoreKnown || routeScore.RoutingScore > view.RoutingScore {
 				view.RoutingScore = routeScore.RoutingScore
 				view.RoutingScoreKnown = routeScore.HasPerformanceData || known
@@ -152,6 +169,8 @@ func (g *Gateway) ControlSnapshot() ControlSnapshot {
 				CredentialID:         route.CredentialID,
 				Access:               route.EffectiveAccess(),
 				Enabled:              route.Enabled,
+				AutoRouteAllowed:     route.AllowsAutomaticRouting(),
+				ProbeAllowed:         route.AllowsProbe(),
 				Capabilities:         caps,
 				Health:               routeHealth,
 				TTFTMs:               ttft,
@@ -164,9 +183,34 @@ func (g *Gateway) ControlSnapshot() ControlSnapshot {
 				RoutingScore:         routeScore.RoutingScore,
 				RoutingScoreKnown:    routeScore.HasPerformanceData || known,
 			})
+			controlRoute := &view.Routes[len(view.Routes)-1]
+			if !controlRoute.PerformanceKnown {
+				if len(g.benchmarkSnapshot.Models) == 0 {
+					controlRoute.PerformanceReason = "no_snapshot"
+				} else if !bound {
+					controlRoute.PerformanceReason = "no_unique_match"
+				} else {
+					controlRoute.PerformanceReason = "no_source_metrics"
+				}
+			}
+			if !controlRoute.TTFTKnown {
+				switch {
+				case !view.Selected:
+					controlRoute.LatencyReason = "not_selected"
+				case !controlRoute.ProbeAllowed:
+					controlRoute.LatencyReason = "probe_disabled"
+				case stale:
+					controlRoute.LatencyReason = "stale"
+				default:
+					controlRoute.LatencyReason = "no_sample"
+				}
+			}
+			if !controlRoute.RoutingScoreKnown {
+				controlRoute.ScoreReason = "no_performance_and_latency"
+			}
 			providerView := providers[route.Provider]
 			if providerView == nil {
-				providerView = &ControlProvider{ID: route.Provider}
+				providerView = &ControlProvider{ID: route.Provider, Available: true}
 				providers[route.Provider] = providerView
 			}
 			providerView.Routes++
@@ -329,6 +373,7 @@ func (g *Gateway) RestoreControlState(selected []model.ProviderModelID, mode str
 		if poolMode == "" {
 			poolMode = catalog.ModeManual
 		}
+		selected = g.applyGenericSelectionPolicy(selected)
 		var updateErr error
 		g.pool.Mutate(func(p *catalog.PoolState) { updateErr = p.Replace(selected, poolMode) })
 		if updateErr != nil {
@@ -346,6 +391,30 @@ func (g *Gateway) RestoreControlState(selected []model.ProviderModelID, mode str
 		g.pinnedModel = pinned
 	}
 	return nil
+}
+
+func (g *Gateway) applyGenericSelectionPolicy(selected []model.ProviderModelID) []model.ProviderModelID {
+	chosen := make(map[model.ProviderModelID]bool, len(selected))
+	for _, id := range selected {
+		chosen[id] = true
+	}
+	for id, routes := range g.routes {
+		for _, route := range routes {
+			if route.DefaultSelected == nil {
+				continue
+			}
+			chosen[id] = route.Enabled && route.SelectedByDefault()
+			break
+		}
+	}
+	out := make([]model.ProviderModelID, 0, len(chosen))
+	for id, include := range chosen {
+		if include {
+			out = append(out, id)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 func addUniqueIDs(base, additions []model.ProviderModelID) []model.ProviderModelID {

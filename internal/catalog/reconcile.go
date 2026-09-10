@@ -64,8 +64,9 @@ func (r *Reconciler) Reconcile(p *PoolState, snap *model.CatalogSnapshot, routes
 
 	// Access change detection and automatic-mode inclusion.
 	for id := range snap.Models {
-		// Automatic mode: include models with an enabled free/free-tier route.
-		if p.Config.Mode == ModeAutomatic && hasAutoRoutableRoute(routes[id]) && !p.Config.Contains(id) {
+		// Generic providers may explicitly opt discovered models into the pool;
+		// legacy/native routes retain Automatic-mode access semantics.
+		if (hasDefaultSelectedRoute(routes[id]) || (p.Config.Mode == ModeAutomatic && hasAutoRoutableRoute(routes[id]))) && !p.Config.Contains(id) {
 			p.Config.SelectedProviderModelIDs = append(p.Config.SelectedProviderModelIDs, id)
 			res.Added = append(res.Added, id)
 		}
@@ -77,6 +78,15 @@ func (r *Reconciler) Reconcile(p *PoolState, snap *model.CatalogSnapshot, routes
 	// current access so callers can diff if they retain prior snapshots.
 	p.Config.Revision++
 	return res, nil
+}
+
+func hasDefaultSelectedRoute(routes []model.ProviderRoute) bool {
+	for _, route := range routes {
+		if route.Enabled && route.SelectedByDefault() {
+			return true
+		}
+	}
+	return false
 }
 
 // DetectAccessChanges compares two snapshots for the given selected ids and

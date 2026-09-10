@@ -55,8 +55,7 @@ func New(reg *latency.Registry, h *health.Manager, interval time.Duration) *Sche
 }
 
 // EligibleTargets filters routes down to probeable candidates (PLAN_V7 §10):
-// selected pool ∩ enabled route ∩ Free/Free-tier ∩ not cooling down.
-// Paid/Unknown routes are never auto-probed.
+// selected pool ∩ enabled route ∩ probe policy ∩ not cooling down.
 func EligibleTargets(catalog *model.CatalogSnapshot, pool []model.ProviderModelID, routes map[model.ProviderModelID][]model.ProviderRoute, h *health.Manager) []Target {
 	var out []Target
 	if catalog == nil {
@@ -76,8 +75,8 @@ func EligibleTargets(catalog *model.CatalogSnapshot, pool []model.ProviderModelI
 			if !route.Enabled {
 				continue
 			}
-			if !route.EffectiveAccess().AutoRoutable() {
-				continue // Paid/Unknown never probed
+			if !route.AllowsProbe() {
+				continue
 			}
 			if h != nil && !h.Available(string(route.ID)) {
 				continue // cooling down or quota exhausted

@@ -384,13 +384,17 @@ func TestChatCompletionStreaming(t *testing.T) {
 	}
 }
 
-func TestEmptyCatalogFails(t *testing.T) {
+func TestEmptyCatalogKeepsManagementStateAvailable(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"data":[]}`))
 	}))
 	defer backend.Close()
-	if _, err := NewGateway(context.Background(), fakeProvider{base: backend.URL}); err == nil {
-		t.Fatal("expected error on empty catalog")
+	gateway, err := NewGateway(context.Background(), fakeProvider{base: backend.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot := gateway.ControlSnapshot(); len(snapshot.Models) != 0 {
+		t.Fatalf("snapshot = %#v", snapshot)
 	}
 }
 

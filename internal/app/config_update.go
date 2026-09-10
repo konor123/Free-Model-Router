@@ -30,9 +30,21 @@ func updateConfig(cfg *config.Config, secrets *config.SecretStore, request contr
 		providerConfig := config.ProviderConfig{ID: item.ID, Name: item.Name, Protocol: item.Protocol, BaseURL: item.BaseURL, Enabled: item.Enabled}
 		if old, ok := existing[item.ID]; ok {
 			providerConfig.CredentialRef = old.CredentialRef
+			providerConfig.AutoProbe = old.AutoProbe
+			providerConfig.ExcludedModelIDs = append([]string(nil), old.ExcludedModelIDs...)
 			if old.BaseURL != item.BaseURL && old.CredentialRef != "" && item.APIKey == nil {
 				return control.ConfigUpdateResponse{}, fmt.Errorf("provider %q endpoint changed; replace or clear its credential explicitly", item.ID)
 			}
+		}
+		if item.AutoProbe != nil {
+			value := *item.AutoProbe
+			providerConfig.AutoProbe = &value
+		} else if _, ok := existing[item.ID]; !ok {
+			value := true
+			providerConfig.AutoProbe = &value
+		}
+		if item.ExcludedModelIDs != nil {
+			providerConfig.ExcludedModelIDs = append([]string(nil), (*item.ExcludedModelIDs)...)
 		}
 		if item.APIKey != nil {
 			if providerConfig.CredentialRef != "" {

@@ -108,3 +108,27 @@ func TestUpdateConfigReturnsGeneratedInferenceKeyOnce(t *testing.T) {
 		t.Fatal("masked config did not report configured key")
 	}
 }
+
+func TestUpdateConfigPreservesOmittedGenericPolicyAndClearsExplicitExclusions(t *testing.T) {
+	probe := false
+	cfg := config.PersistedDefaults()
+	cfg.Providers = []config.ProviderConfig{{ID: "local", Name: "Local", Protocol: config.OpenAICompatibleProtocol, BaseURL: "https://example.test/v1", Enabled: true, AutoProbe: &probe, ExcludedModelIDs: []string{"vendor/model"}}}
+	secrets := config.NewSecretStore(filepath.Join(t.TempDir(), "secrets.json"))
+	request := control.ProviderConfigUpdate{ID: "local", Name: "Local", Protocol: config.OpenAICompatibleProtocol, BaseURL: "https://example.test/v1", Enabled: true}
+	response, err := updateConfig(cfg, secrets, control.ConfigUpdateRequest{Revision: 0, Bind: cfg.Bind, Providers: []control.ProviderConfigUpdate{request}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Config.Providers[0].AutoProbe || len(response.Config.Providers[0].ExcludedModelIDs) != 1 {
+		t.Fatalf("omitted policy was reset: %#v", response.Config.Providers[0])
+	}
+	empty := []string{}
+	request.ExcludedModelIDs = &empty
+	_, err = updateConfig(cfg, secrets, control.ConfigUpdateRequest{Revision: 1, Bind: cfg.Bind, Providers: []control.ProviderConfigUpdate{request}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Providers[0].ExcludedModelIDs) != 0 {
+		t.Fatalf("explicit empty exclusions were not cleared: %#v", cfg.Providers[0])
+	}
+}

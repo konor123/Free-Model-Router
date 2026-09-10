@@ -26,6 +26,9 @@ func TestControlSnapshotAndOptimisticPoolMutations(t *testing.T) {
 	if initial.Providers[0].Models != 2 || initial.Providers[0].Routes != 2 {
 		t.Fatalf("provider summary = %+v", initial.Providers)
 	}
+	if route := initial.Models[0].Routes[0]; route.PerformanceReason != "no_snapshot" || route.LatencyReason != "no_sample" || route.ScoreReason != "no_performance_and_latency" {
+		t.Fatalf("metric reasons = %+v", route)
+	}
 
 	id := initial.Models[0].Model.ID
 	updated, err := g.UpdateModelPool(initial.Pool.Revision, PoolMutation{Deselect: []model.ProviderModelID{id}})

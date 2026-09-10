@@ -35,3 +35,26 @@ func TestValidateProvidersRejectsCrossPurposeSecretReference(t *testing.T) {
 		t.Fatal("accepted a non-provider credential reference")
 	}
 }
+
+func TestProviderPolicyDefaultsAndCloneAreIndependent(t *testing.T) {
+	providers := []ProviderConfig{{ID: "local", AutoProbe: nil, ExcludedModelIDs: []string{"vendor/model"}}}
+	cloned := cloneProviders(providers)
+	if !cloned[0].AutoProbeEnabled() || !cloned[0].ModelExcluded("vendor/model") {
+		t.Fatalf("policy defaults = %#v", cloned[0])
+	}
+	cloned[0].ExcludedModelIDs[0] = "changed"
+	if providers[0].ExcludedModelIDs[0] != "vendor/model" {
+		t.Fatal("clone mutated source exclusions")
+	}
+}
+
+func TestValidateProvidersRejectsInvalidExclusions(t *testing.T) {
+	base := ProviderConfig{ID: "local", Name: "Local", Protocol: OpenAICompatibleProtocol, BaseURL: "https://example.test/v1", Enabled: true}
+	for _, excluded := range [][]string{{""}, {"vendor/model", "vendor/model"}, {"bad\nmodel"}} {
+		candidate := base
+		candidate.ExcludedModelIDs = excluded
+		if err := validateProviders([]ProviderConfig{candidate}); err == nil {
+			t.Fatalf("accepted exclusions %#v", excluded)
+		}
+	}
+}

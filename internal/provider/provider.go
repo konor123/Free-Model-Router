@@ -68,8 +68,18 @@ type Provider interface {
 // it. Providers that aggregate multiple upstreams implement
 // RoutedCatalogProvider so the gateway never assumes OpenCode route semantics.
 type RoutedCatalog struct {
-	Snapshot *model.CatalogSnapshot
-	Routes   map[model.ProviderModelID][]model.ProviderRoute
+	Snapshot  *model.CatalogSnapshot
+	Routes    map[model.ProviderModelID][]model.ProviderRoute
+	Providers []ProviderAvailability
+}
+
+// ProviderAvailability separates configured provider inventory from the
+// subset that contributed usable routes to the current catalog.
+type ProviderAvailability struct {
+	ID        string `json:"id"`
+	Available bool   `json:"available"`
+	ErrorCode string `json:"errorCode,omitempty"`
+	Message   string `json:"message,omitempty"`
 }
 
 // RoutedCatalogProvider is an optional extension for provider dispatchers.

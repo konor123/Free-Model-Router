@@ -61,17 +61,21 @@ func configuredProvider(cfg *config.Config, secrets *config.SecretStore) (provid
 		if err != nil {
 			return nil, fmt.Errorf("configure provider %q: %w", item.ID, err)
 		}
-		entries = append(entries, registry.Entry{ID: item.ID, Backend: backend, Routes: genericRoutes(item.ID)})
+		entries = append(entries, registry.Entry{ID: item.ID, Backend: backend, Routes: genericRoutes(item)})
 	}
 	return registry.New(entries)
 }
 
-func genericRoutes(id string) registry.RouteBuilder {
+func genericRoutes(providerConfig config.ProviderConfig) registry.RouteBuilder {
 	return func(pm model.ProviderModel) ([]model.ProviderRoute, error) {
-		routeID, err := model.NewRouteID(id, pm.UpstreamID)
+		routeID, err := model.NewRouteID(providerConfig.ID, pm.UpstreamID)
 		if err != nil {
 			return nil, err
 		}
-		return []model.ProviderRoute{{ID: routeID, ModelID: pm.ID, Provider: id, UpstreamModelID: pm.UpstreamID, CredentialID: id, Access: model.AccessUnknown, Enabled: true, CapabilityOverride: &model.Capabilities{Streaming: true, Tools: true, StructuredOutput: true, Vision: true, Reasoning: true}}}, nil
+		excluded := providerConfig.ModelExcluded(pm.UpstreamID)
+		autoRoute := !excluded
+		probeAllowed := providerConfig.AutoProbeEnabled() && !excluded
+		defaultSelected := !excluded
+		return []model.ProviderRoute{{ID: routeID, ModelID: pm.ID, Provider: providerConfig.ID, UpstreamModelID: pm.UpstreamID, CredentialID: providerConfig.ID, Access: model.AccessUnknown, Enabled: !excluded, AutoRouteAllowed: &autoRoute, ProbeAllowed: &probeAllowed, DefaultSelected: &defaultSelected, CapabilityOverride: &model.Capabilities{Streaming: true, Tools: true, StructuredOutput: true, Vision: true, Reasoning: true}}}, nil
 	}
 }

@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -11,11 +12,70 @@ import (
 
 type fakeProvider struct {
 	snapshot *model.CatalogSnapshot
+	err      error
 	calls    int
 }
 
 func (f *fakeProvider) DiscoverModels(context.Context) (*model.CatalogSnapshot, error) {
-	return f.snapshot, nil
+	return f.snapshot, f.err
+}
+
+func TestRegistryKeepsUsableProviderWhenAnotherDiscoveryFails(t *testing.T) {
+	pm := testModel(t, "good", "model")
+	good := &fakeProvider{snapshot: &model.CatalogSnapshot{Models: map[model.ProviderModelID]model.ProviderModel{pm.ID: pm}}}
+	bad := &fakeProvider{err: provider.NewFailureError(model.NewFailure(model.FailureNetwork, model.ScopeProvider), errors.New("secret must not escape"))}
+	builder := func(pm model.ProviderModel) ([]model.ProviderRoute, error) {
+		owner, _, _ := pm.ID.Parse()
+		rid, _ := model.NewRouteID(owner, pm.UpstreamID)
+		return []model.ProviderRoute{{ID: rid, ModelID: pm.ID, Provider: owner, UpstreamModelID: pm.UpstreamID, Access: model.AccessFree, Enabled: true}}, nil
+	}
+	r, err := New([]Entry{{ID: "bad", Backend: bad, Routes: builder}, {ID: "good", Backend: good, Routes: builder}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := r.DiscoverRoutedCatalog(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Snapshot.Models) != 1 {
+		t.Fatalf("models = %d", len(catalog.Snapshot.Models))
+	}
+	if len(catalog.Providers) != 2 || catalog.Providers[0].ID != "bad" || catalog.Providers[0].Message == "secret must not escape" {
+		t.Fatalf("providers = %#v", catalog.Providers)
+	}
+}
+
+func TestRegistryReportsAllProvidersUnavailableWithEmptyCatalog(t *testing.T) {
+	failure := provider.NewFailureError(model.NewFailure(model.FailureNetwork, model.ScopeProvider), errors.New("offline"))
+	r, err := New([]Entry{{ID: "bad", Backend: &fakeProvider{err: failure}, Routes: func(model.ProviderModel) ([]model.ProviderRoute, error) { return nil, nil }}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := r.DiscoverRoutedCatalog(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Snapshot.Models) != 0 || len(catalog.Providers) != 1 || catalog.Providers[0].Available {
+		t.Fatalf("catalog = %#v", catalog)
+	}
+}
+
+func TestRegistryDoesNotPublishPartialCatalogAfterCancellation(t *testing.T) {
+	pm := testModel(t, "good", "model")
+	good := &fakeProvider{snapshot: &model.CatalogSnapshot{Models: map[model.ProviderModelID]model.ProviderModel{pm.ID: pm}}}
+	canceled := &fakeProvider{err: provider.NewFailureError(model.NewFailure(model.FailureNetwork, model.ScopeProvider), context.Canceled)}
+	builder := func(pm model.ProviderModel) ([]model.ProviderRoute, error) {
+		owner, _, _ := pm.ID.Parse()
+		rid, _ := model.NewRouteID(owner, pm.UpstreamID)
+		return []model.ProviderRoute{{ID: rid, ModelID: pm.ID, Provider: owner, UpstreamModelID: pm.UpstreamID, Enabled: true}}, nil
+	}
+	r, err := New([]Entry{{ID: "good", Backend: good, Routes: builder}, {ID: "later", Backend: canceled, Routes: builder}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.DiscoverRoutedCatalog(context.Background()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation error = %v", err)
+	}
 }
 func (f *fakeProvider) ChatCompletion(context.Context, model.ProviderRoute, provider.NormalizedRequest) (provider.ChatStream, error) {
 	f.calls++
@@ -49,7 +109,7 @@ func TestRegistryKeepsSameUpstreamModelsSeparated(t *testing.T) {
 	builder := func(pm model.ProviderModel) ([]model.ProviderRoute, error) {
 		owner, _, _ := pm.ID.Parse()
 		rid, _ := model.NewRouteID(owner, pm.UpstreamID)
-		return []model.ProviderRoute{{ID: rid, ModelID: pm.ID, Provider: owner, UpstreamModelID: pm.UpstreamID, Enabled: true}}, nil
+		return []model.ProviderRoute{{ID: rid, ModelID: pm.ID, Provider: owner, UpstreamModelID: pm.UpstreamID, Access: model.AccessFree, Enabled: true}}, nil
 	}
 	r, err := New([]Entry{{ID: "one", Backend: one, Routes: builder}, {ID: "two", Backend: two, Routes: builder}})
 	if err != nil {

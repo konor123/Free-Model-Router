@@ -42,6 +42,7 @@ type Gateway struct {
 	mu                sync.RWMutex
 	catalog           *model.CatalogSnapshot
 	routes            map[model.ProviderModelID][]model.ProviderRoute
+	providers         []provider.ProviderAvailability
 	pool              *catalog.Store
 	reconciler        *catalog.Reconciler
 	health            *health.Manager
@@ -52,6 +53,7 @@ type Gateway struct {
 	failover          FailoverPolicy
 	benchmarkSnapshot scoring.Snapshot
 	benchmarkBindings map[model.ProviderModelID]matcher.BenchmarkBinding
+	benchmarkStatus   BenchmarkStatus
 	usageSink         usage.Sink
 	usageEvents       usage.EventPublisher
 	pinnedModel       model.ProviderModelID
@@ -128,6 +130,7 @@ func NewGatewayWithFailoverPolicy(ctx context.Context, p provider.Provider, poli
 		latency:           latency.NewRegistry(),
 		failover:          policy.normalized(),
 		benchmarkBindings: make(map[model.ProviderModelID]matcher.BenchmarkBinding),
+		benchmarkStatus:   BenchmarkStatus{State: "never-fetched"},
 	}
 	g.probes = probe.New(g.latency, g.health, 30*time.Second)
 	if err := g.RefreshCatalog(ctx); err != nil {
@@ -145,9 +148,10 @@ func NewGatewayWithPolicy(ctx context.Context, p provider.Provider, policy Failo
 // RefreshCatalog re-discovers models and repicks fmr/auto target.
 func (g *Gateway) RefreshCatalog(ctx context.Context) error {
 	var (
-		snap   *model.CatalogSnapshot
-		routes map[model.ProviderModelID][]model.ProviderRoute
-		err    error
+		snap      *model.CatalogSnapshot
+		routes    map[model.ProviderModelID][]model.ProviderRoute
+		providers []provider.ProviderAvailability
+		err       error
 	)
 	if routed, ok := g.Prov.(provider.RoutedCatalogProvider); ok {
 		catalog, discoverErr := routed.DiscoverRoutedCatalog(ctx)
@@ -158,6 +162,7 @@ func (g *Gateway) RefreshCatalog(ctx context.Context) error {
 			return errors.New("routed provider returned an empty catalog")
 		}
 		snap, routes = catalog.Snapshot, catalog.Routes
+		providers = append([]provider.ProviderAvailability(nil), catalog.Providers...)
 	} else {
 		snap, err = g.Prov.DiscoverModels(ctx)
 		if err != nil {
@@ -176,9 +181,6 @@ func (g *Gateway) RefreshCatalog(ctx context.Context) error {
 	if err := snap.Validate(); err != nil {
 		return fmt.Errorf("catalog snapshot: %w", err)
 	}
-	if len(snap.Models) == 0 {
-		return errors.New("catalog empty: no routable models")
-	}
 	candidatePool := g.pool.StateSnapshot()
 	var reconcileErr error
 	_, reconcileErr = g.reconciler.Reconcile(candidatePool, snap, routes)
@@ -190,7 +192,7 @@ func (g *Gateway) RefreshCatalog(ctx context.Context) error {
 		return err
 	}
 	g.pool.ReplaceState(candidatePool)
-	g.catalog, g.routes = snap, routes
+	g.catalog, g.routes, g.providers = snap, routes, providers
 	g.rebuildBenchmarkBindingsLocked()
 	g.autoPick, g.autoRoute = "", model.ProviderRoute{}
 	ids := make([]model.ProviderModelID, 0, len(snap.Models))

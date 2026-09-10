@@ -109,6 +109,23 @@ func TestManualModeDoesNotAutoAdd(t *testing.T) {
 	}
 }
 
+func TestManualModeAddsExplicitGenericDefaults(t *testing.T) {
+	p := NewPoolState(&ModelPoolConfig{Mode: ModeManual})
+	r := NewReconciler()
+	a := pm("generic")
+	selected := true
+	routes := routesFor(a.ID, model.AccessUnknown, true)
+	route := routes[a.ID][0]
+	route.DefaultSelected = &selected
+	routes[a.ID] = []model.ProviderRoute{route}
+	if _, err := r.Reconcile(p, snapWith(a), routes); err != nil {
+		t.Fatal(err)
+	}
+	if !p.Config.Contains(a.ID) || p.Config.Mode != ModeManual {
+		t.Fatalf("generic defaults were not selected in Manual mode: %#v", p.Config)
+	}
+}
+
 func TestSelectSwitchesToManual(t *testing.T) {
 	p := NewPoolState(&ModelPoolConfig{Mode: ModeAutomatic})
 	p.Select([]model.ProviderModelID{pm("x").ID})

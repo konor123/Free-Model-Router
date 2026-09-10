@@ -59,3 +59,21 @@ func TestBenchmarkScoreChangesRuntimeCandidateSelection(t *testing.T) {
 		t.Fatalf("scored selection calls = %v, want high-performance model first", calls)
 	}
 }
+
+func TestBenchmarkStatusPreservesLastSuccessAcrossFailure(t *testing.T) {
+	g, err := NewGateway(context.Background(), &fallbackProvider{models: []string{"model"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := g.BenchmarkStatus().State; got != "never-fetched" {
+		t.Fatalf("initial state = %q", got)
+	}
+	now := time.Unix(10, 0).UTC()
+	g.SetBenchmarkSource("cache", now)
+	g.MarkBenchmarkFetching(now.Add(time.Second))
+	g.MarkBenchmarkFailure(now.Add(2*time.Second), "fetch_timeout")
+	status := g.BenchmarkStatus()
+	if status.State != "failed" || status.Source != "cache" || status.ErrorCode != "fetch_timeout" || !status.LastSuccessAt.Equal(now) {
+		t.Fatalf("status = %#v", status)
+	}
+}
