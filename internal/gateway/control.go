@@ -8,6 +8,7 @@ import (
 
 	"github.com/konor123/Free-Model-Router/internal/catalog"
 	"github.com/konor123/Free-Model-Router/internal/health"
+	"github.com/konor123/Free-Model-Router/internal/latency"
 	"github.com/konor123/Free-Model-Router/internal/model"
 	"github.com/konor123/Free-Model-Router/internal/scoring"
 )
@@ -34,29 +35,37 @@ type PoolMutation struct {
 // ControlRoute is a defensive route view for the management API and desktop.
 // It contains no credentials, request content, or secret values.
 type ControlRoute struct {
-	ID                   model.RouteID         `json:"id"`
-	ModelID              model.ProviderModelID `json:"modelId"`
-	Provider             string                `json:"provider"`
-	UpstreamModelID      string                `json:"upstreamModelId"`
-	CredentialID         string                `json:"credentialId,omitempty"`
-	Access               model.AccessClass     `json:"access"`
-	Enabled              bool                  `json:"enabled"`
-	AutoRouteAllowed     bool                  `json:"autoRouteAllowed"`
-	ProbeAllowed         bool                  `json:"probeAllowed"`
-	Capabilities         model.Capabilities    `json:"capabilities"`
-	Health               health.RouteSnapshot  `json:"health"`
-	TTFTMs               float64               `json:"ttftMs,omitempty"`
-	TTFTKnown            bool                  `json:"ttftKnown"`
-	Performance          float64               `json:"performance,omitempty"`
-	PerformanceKnown     bool                  `json:"performanceKnown"`
-	EffectivePerformance float64               `json:"effectivePerformance,omitempty"`
-	Confidence           float64               `json:"confidence,omitempty"`
-	LatencyScore         float64               `json:"latencyScore,omitempty"`
-	RoutingScore         float64               `json:"routingScore,omitempty"`
-	RoutingScoreKnown    bool                  `json:"routingScoreKnown"`
-	PerformanceReason    string                `json:"performanceReason,omitempty"`
-	LatencyReason        string                `json:"latencyReason,omitempty"`
-	ScoreReason          string                `json:"scoreReason,omitempty"`
+	ID               model.RouteID         `json:"id"`
+	ModelID          model.ProviderModelID `json:"modelId"`
+	Provider         string                `json:"provider"`
+	UpstreamModelID  string                `json:"upstreamModelId"`
+	CredentialID     string                `json:"credentialId,omitempty"`
+	Access           model.AccessClass     `json:"access"`
+	Enabled          bool                  `json:"enabled"`
+	AutoRouteAllowed bool                  `json:"autoRouteAllowed"`
+	ProbeAllowed     bool                  `json:"probeAllowed"`
+	Capabilities     model.Capabilities    `json:"capabilities"`
+	Health           health.RouteSnapshot  `json:"health"`
+	TTFTMs           float64               `json:"ttftMs,omitempty"`
+	TTFTKnown        bool                  `json:"ttftKnown"`
+	// LastKnownTTFTMs and TTFTMeasuredAt expose the historical sample for
+	// display only; they never feed routing or scores.
+	LastKnownTTFTMs      float64   `json:"lastKnownTTFTMs,omitempty"`
+	TTFTKnownEver        bool      `json:"ttftKnownEver"`
+	TTFTMeasuredAt       time.Time `json:"ttftMeasuredAt,omitempty"`
+	TTFTSource           string    `json:"ttftSource,omitempty"`
+	ProbeOutcome         string    `json:"probeOutcome,omitempty"`
+	ProbeAttemptAt       time.Time `json:"probeAttemptAt,omitempty"`
+	Performance          float64   `json:"performance,omitempty"`
+	PerformanceKnown     bool      `json:"performanceKnown"`
+	EffectivePerformance float64   `json:"effectivePerformance,omitempty"`
+	Confidence           float64   `json:"confidence,omitempty"`
+	LatencyScore         float64   `json:"latencyScore,omitempty"`
+	RoutingScore         float64   `json:"routingScore,omitempty"`
+	RoutingScoreKnown    bool      `json:"routingScoreKnown"`
+	PerformanceReason    string    `json:"performanceReason,omitempty"`
+	LatencyReason        string    `json:"latencyReason,omitempty"`
+	ScoreReason          string    `json:"scoreReason,omitempty"`
 }
 
 // ControlModel is a defensive model view with all route variants.
@@ -124,14 +133,18 @@ func (g *Gateway) ControlSnapshot() ControlSnapshot {
 	for _, availability := range g.providers {
 		providers[availability.ID] = &ControlProvider{ID: availability.ID, Available: availability.Available, ErrorCode: availability.ErrorCode, Message: availability.Message}
 	}
+	now := time.Now()
+	latencyViews := make(map[model.RouteID]latency.SampleView)
 	latencyPopulation := make([]float64, 0)
 	for _, routes := range g.routes {
 		for _, route := range routes {
 			if g.latency == nil {
 				continue
 			}
-			if value, known := g.latency.EffectiveTTFT(string(route.ID)); known {
-				latencyPopulation = append(latencyPopulation, value)
+			sample := g.latency.Snapshot(string(route.ID), now, routingTTFTMaxAge)
+			latencyViews[route.ID] = sample
+			if sample.Fresh {
+				latencyPopulation = append(latencyPopulation, sample.ValueMs)
 			}
 		}
 	}
@@ -140,12 +153,12 @@ func (g *Gateway) ControlSnapshot() ControlSnapshot {
 		view := ControlModel{Model: pm, Selected: selected[id], Pinned: id == g.pinnedModel}
 		for _, route := range g.routes[id] {
 			caps := route.EffectiveCapabilities(pm.Base)
+			sample := latencyViews[route.ID]
 			ttft, known, stale := 0.0, false, false
-			if g.latency != nil {
-				ttft, known = g.latency.FreshTTFT(string(route.ID), time.Now(), routingTTFTMaxAge)
-				if !known {
-					_, stale = g.latency.EffectiveTTFT(string(route.ID))
-				}
+			if sample.Fresh {
+				ttft, known = sample.ValueMs, true
+			} else if sample.Known {
+				stale = true
 			}
 			routeHealth := health.RouteSnapshot{}
 			if g.health != nil {
@@ -175,6 +188,12 @@ func (g *Gateway) ControlSnapshot() ControlSnapshot {
 				Health:               routeHealth,
 				TTFTMs:               ttft,
 				TTFTKnown:            known,
+				LastKnownTTFTMs:      sample.ValueMs,
+				TTFTKnownEver:        sample.Known,
+				TTFTMeasuredAt:       sample.MeasuredAt,
+				TTFTSource:           sample.Source,
+				ProbeOutcome:         sample.ProbeOutcome,
+				ProbeAttemptAt:       sample.ProbeAttemptAt,
 				Performance:          routeScore.Performance,
 				PerformanceKnown:     routeScore.HasPerformanceData,
 				EffectivePerformance: routeScore.EffectivePerformance,

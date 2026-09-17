@@ -26,8 +26,9 @@ type Provider struct {
 	// AuthBaseOverride overrides the Zen auth base URL (tests only).
 	AuthBaseOverride string
 	// HTTP client used for all calls.
-	HTTP *http.Client
+	HTTP              *http.Client
 	resolveCredential ResolveCredential
+	catalogFilter     CatalogFilter
 	nativeFreeOnly    bool
 }
 
@@ -35,11 +36,19 @@ type Provider struct {
 // before an authenticated request. It must not retain plaintext credentials.
 type ResolveCredential func() (string, error)
 
+// CatalogFilter decides whether a discovered model belongs in the catalog.
+type CatalogFilter func(id string, pricing map[string]json.RawMessage) bool
+
 type option func(*Provider)
 
 // WithCredentialResolver configures the native Zen credential source.
 func WithCredentialResolver(resolve ResolveCredential) option {
 	return func(p *Provider) { p.resolveCredential = resolve }
+}
+
+// WithCatalogFilter applies an endpoint-specific catalog policy after parsing.
+func WithCatalogFilter(filter CatalogFilter) option {
+	return func(p *Provider) { p.catalogFilter = filter }
 }
 
 // New builds a Provider with sane defaults.
@@ -70,13 +79,53 @@ type catalogEntry struct {
 	Object  string `json:"object,omitempty"`
 	OwnedBy string `json:"owned_by,omitempty"`
 
-	ContextLength int   `json:"context_length,omitempty"`
-	MaxOutput     int   `json:"max_output_tokens,omitempty"`
-	Streaming     *bool `json:"streaming,omitempty"`
-	Tools         *bool `json:"tools,omitempty"`
-	Vision        *bool `json:"vision,omitempty"`
-	Structured    *bool `json:"structured_output,omitempty"`
-	Reasoning     *bool `json:"reasoning,omitempty"`
+	ContextLength int                        `json:"context_length,omitempty"`
+	MaxOutput     int                        `json:"max_output_tokens,omitempty"`
+	Streaming     *bool                      `json:"streaming,omitempty"`
+	Tools         *bool                      `json:"tools,omitempty"`
+	Vision        *bool                      `json:"vision,omitempty"`
+	Structured    *bool                      `json:"structured_output,omitempty"`
+	Reasoning     *bool                      `json:"reasoning,omitempty"`
+	Pricing       map[string]json.RawMessage `json:"pricing,omitempty"`
+}
+
+// UnmarshalJSON accepts vendor-specific metadata shapes while preserving the
+// common OpenAI-compatible model identity. Unsupported metadata stays unknown
+// instead of rejecting the provider's entire catalog.
+func (e *catalogEntry) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ID, Object, OwnedBy                             string
+		ContextLength, MaxOutput                        json.RawMessage
+		Streaming, Tools, Vision, Structured, Reasoning json.RawMessage
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	_ = json.Unmarshal(fields["id"], &raw.ID)
+	_ = json.Unmarshal(fields["object"], &raw.Object)
+	_ = json.Unmarshal(fields["owned_by"], &raw.OwnedBy)
+	raw.ContextLength, raw.MaxOutput = fields["context_length"], fields["max_output_tokens"]
+	raw.Streaming, raw.Tools = fields["streaming"], fields["tools"]
+	raw.Vision, raw.Structured, raw.Reasoning = fields["vision"], fields["structured_output"], fields["reasoning"]
+	var pricing map[string]json.RawMessage
+	_ = json.Unmarshal(fields["pricing"], &pricing)
+	*e = catalogEntry{ID: raw.ID, Object: raw.Object, OwnedBy: raw.OwnedBy, ContextLength: optionalCatalogInt(raw.ContextLength), MaxOutput: optionalCatalogInt(raw.MaxOutput), Streaming: optionalCatalogBool(raw.Streaming), Tools: optionalCatalogBool(raw.Tools), Vision: optionalCatalogBool(raw.Vision), Structured: optionalCatalogBool(raw.Structured), Reasoning: optionalCatalogBool(raw.Reasoning), Pricing: pricing}
+	return nil
+}
+
+func optionalCatalogBool(raw json.RawMessage) *bool {
+	var value bool
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
+		return nil
+	}
+	return &value
+}
+
+func optionalCatalogInt(raw json.RawMessage) int {
+	var value int
+	_ = json.Unmarshal(raw, &value)
+	return value
 }
 
 // DiscoverModels fetches /models and normalizes into ProviderModels.
@@ -131,6 +180,9 @@ func (p *Provider) DiscoverModels(ctx context.Context) (*model.CatalogSnapshot, 
 	}
 	for _, e := range parsed.Data {
 		if e.ID == "" {
+			continue
+		}
+		if p.catalogFilter != nil && !p.catalogFilter(e.ID, e.Pricing) {
 			continue
 		}
 		pmid, err := model.NewProviderModelID(ProviderID, providerModelSegment(e.ID))

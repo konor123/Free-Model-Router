@@ -127,6 +127,13 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 			if !route.Health.CoolingUntil.IsZero() {
 				coolingUntil = route.Health.CoolingUntil.UTC().Format(time.RFC3339Nano)
 			}
+			measuredAt, probeAttemptAt := "", ""
+			if !route.TTFTMeasuredAt.IsZero() {
+				measuredAt = route.TTFTMeasuredAt.UTC().Format(time.RFC3339Nano)
+			}
+			if !route.ProbeAttemptAt.IsZero() {
+				probeAttemptAt = route.ProbeAttemptAt.UTC().Format(time.RFC3339Nano)
+			}
 			available := !route.Health.QuotaExhausted && (route.Health.CoolingUntil.IsZero() || time.Now().After(route.Health.CoolingUntil))
 			modelResponse.Routes = append(modelResponse.Routes, RouteResponse{
 				ID:               string(route.ID),
@@ -144,6 +151,9 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 					ConsecutiveFailures: route.Health.ConsecutiveFailures, Available: available,
 				},
 				TTFTMs: route.TTFTMs, TTFTKnown: route.TTFTKnown,
+				LastKnownTTFTMs: route.LastKnownTTFTMs, TTFTKnownEver: route.TTFTKnownEver,
+				TTFTMeasuredAt: measuredAt, TTFTSource: route.TTFTSource,
+				ProbeOutcome: route.ProbeOutcome, ProbeAttemptAt: probeAttemptAt,
 				Performance: route.Performance, PerformanceKnown: route.PerformanceKnown, EffectivePerformance: route.EffectivePerformance,
 				Confidence: route.Confidence, LatencyScore: route.LatencyScore,
 				RoutingScore: route.RoutingScore, RoutingScoreKnown: route.RoutingScoreKnown,

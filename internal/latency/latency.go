@@ -55,12 +55,14 @@ func (e *EWMA) Samples() int {
 
 // Stats bundles the three maintained averages for one route.
 type Stats struct {
-	ProbeTTFT     *EWMA // from probe requests
-	RequestTTFT   *EWMA // from real client requests
-	RequestTotal  *EWMA // total latency of real requests
-	mu            sync.RWMutex
-	LastProbeAt   time.Time
-	LastRequestAt time.Time
+	ProbeTTFT          *EWMA // from probe requests
+	RequestTTFT        *EWMA // from real client requests
+	RequestTotal       *EWMA // total latency of real requests
+	mu                 sync.RWMutex
+	LastProbeAt        time.Time
+	LastRequestAt      time.Time
+	LastProbeOutcome   string
+	LastProbeAttemptAt time.Time
 }
 
 // NewStats builds empty stats.
@@ -98,19 +100,50 @@ func (r *Registry) For(routeID string) *Stats {
 func (r *Registry) RecordProbe(routeID string, ttftMs float64) {
 	if ttftMs > UnknownMs {
 		s := r.For(routeID)
-		s.ProbeTTFT.Add(ttftMs)
 		s.mu.Lock()
+		s.ProbeTTFT.Add(ttftMs)
 		s.LastProbeAt = time.Now()
+		s.LastProbeOutcome = "success"
 		s.mu.Unlock()
 	}
+}
+
+// AgeProbe shifts the probe timestamp backward for tests that need an
+// expired sample without waiting on wall-clock time.
+func (r *Registry) AgeProbe(routeID string, delta time.Duration) {
+	s := r.For(routeID)
+	s.mu.Lock()
+	if !s.LastProbeAt.IsZero() {
+		s.LastProbeAt = s.LastProbeAt.Add(-delta)
+	}
+	s.mu.Unlock()
+}
+
+// BeginProbe records an attempt without changing the successful sample.
+func (r *Registry) BeginProbe(routeID string) {
+	s := r.For(routeID)
+	s.mu.Lock()
+	s.LastProbeAttemptAt = time.Now()
+	s.LastProbeOutcome = "probing"
+	s.mu.Unlock()
+}
+
+// MarkProbeFailure records why the latest probe produced no sample. It never
+// refreshes the previous success timestamp, so fresh-success semantics are
+// preserved for routing while diagnostics retain the failure reason.
+func (r *Registry) MarkProbeFailure(routeID, outcome string) {
+	s := r.For(routeID)
+	s.mu.Lock()
+	s.LastProbeOutcome = outcome
+	s.mu.Unlock()
 }
 
 // RecordRequest records a real request's TTFT and total latency.
 func (r *Registry) RecordRequest(routeID string, ttftMs, totalMs float64) {
 	s := r.For(routeID)
 	if ttftMs > UnknownMs {
-		s.RequestTTFT.Add(ttftMs)
 		s.mu.Lock()
+		s.RequestTTFT.Add(ttftMs)
 		s.LastRequestAt = time.Now()
 		s.mu.Unlock()
 	}
@@ -130,8 +163,8 @@ func (r *Registry) FreshTTFT(routeID string, now time.Time, maxAge time.Duration
 		return 0, false
 	}
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 	probeAt, requestAt := s.LastProbeAt, s.LastRequestAt
-	s.mu.RUnlock()
 	if maxAge > 0 && !probeAt.IsZero() && now.Sub(probeAt) <= maxAge {
 		if value, ok := s.ProbeTTFT.Value(); ok {
 			return value, true
@@ -157,6 +190,49 @@ func (r *Registry) EffectiveTTFT(routeID string) (ms float64, ok bool) {
 		return v, true
 	}
 	return s.RequestTTFT.Value()
+}
+
+// SampleView is a read-only latency view separating the fresh routing value
+// from the last known measurement for display.
+type SampleView struct {
+	Known      bool      // any measurement exists (fresh or historical)
+	Fresh      bool      // measurement is within maxAge for routing
+	ValueMs    float64   // the displayed/routing value
+	Source     string    // "probe" or "request"
+	MeasuredAt time.Time // timestamp of the reported value
+	// ProbeOutcome is "success" after a measured sample, a diagnostic outcome
+	// after a failed attempt, and empty when never probed.
+	ProbeOutcome   string
+	ProbeAttemptAt time.Time
+}
+
+// Snapshot returns the best available view for a route: fresh probe, fresh
+// request, then the historical value for display. Failed attempts never
+// refresh a previous success timestamp.
+func (r *Registry) Snapshot(routeID string, now time.Time, maxAge time.Duration) SampleView {
+	r.mu.RLock()
+	s, exists := r.routes[routeID]
+	r.mu.RUnlock()
+	if !exists {
+		return SampleView{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	probe, probeKnown := s.ProbeTTFT.Value()
+	request, requestKnown := s.RequestTTFT.Value()
+	fresh := func(at time.Time) bool { return maxAge > 0 && !at.IsZero() && now.Sub(at) <= maxAge }
+	view := SampleView{ProbeOutcome: s.LastProbeOutcome, ProbeAttemptAt: s.LastProbeAttemptAt}
+	switch {
+	case probeKnown && fresh(s.LastProbeAt):
+		view.Known, view.Fresh, view.ValueMs, view.Source, view.MeasuredAt = true, true, probe, "probe", s.LastProbeAt
+	case requestKnown && fresh(s.LastRequestAt):
+		view.Known, view.Fresh, view.ValueMs, view.Source, view.MeasuredAt = true, true, request, "request", s.LastRequestAt
+	case requestKnown && (!probeKnown || s.LastRequestAt.After(s.LastProbeAt)):
+		view.Known, view.ValueMs, view.Source, view.MeasuredAt = true, request, "request", s.LastRequestAt
+	case probeKnown:
+		view.Known, view.ValueMs, view.Source, view.MeasuredAt = true, probe, "probe", s.LastProbeAt
+	}
+	return view
 }
 
 // Timer measures TTFT against the first semantic event.

@@ -3,6 +3,8 @@ package probe
 
 import (
 	"context"
+	"errors"
+	"io"
 	"math/rand"
 	"sync"
 	"time"
@@ -32,11 +34,28 @@ type Scheduler struct {
 	done    chan struct{}
 	running bool
 	runID   uint64
+
+	backoffMu sync.Mutex
+	backoffs  map[string]probeBackoff
+	inFlight  map[string]bool
+}
+
+type probeBackoff struct {
+	delay  time.Duration
+	nextAt time.Time
 }
 
 // DefaultProbeTimeout bounds one upstream probe after a provider slot is held.
 const DefaultProbeTimeout = 10 * time.Second
 const maxConcurrentProbes = 4
+
+// Retry backoff for probes that failed with an upstream error. Failed probes
+// are retried with exponential backoff capped at maxProbeBackoff so a broken
+// route does not consume quota on every cycle.
+const (
+	baseProbeBackoff = 30 * time.Second
+	maxProbeBackoff  = 10 * time.Minute
+)
 
 // Snapshot is an immutable, coherent probe view loaded once per cycle.
 type Snapshot struct {
@@ -51,7 +70,7 @@ type SnapshotSource func() *Snapshot
 
 // New builds a Scheduler.
 func New(reg *latency.Registry, h *health.Manager, interval time.Duration) *Scheduler {
-	return &Scheduler{Reg: reg, Health: h, interval: interval, timeout: DefaultProbeTimeout}
+	return &Scheduler{Reg: reg, Health: h, interval: interval, timeout: DefaultProbeTimeout, backoffs: map[string]probeBackoff{}, inFlight: map[string]bool{}}
 }
 
 // EligibleTargets filters routes down to probeable candidates (PLAN_V7 §10):
@@ -191,9 +210,54 @@ func (s *Scheduler) ProbeOnce(ctx context.Context, t Target, prov provider.Provi
 	s.probeOnce(ctx, t, prov)
 }
 
+// claimProbe suppresses concurrent attempts and attempts still backing off.
+func (s *Scheduler) claimProbe(id string, now time.Time) bool {
+	s.backoffMu.Lock()
+	defer s.backoffMu.Unlock()
+	if s.inFlight[id] || now.Before(s.backoffs[id].nextAt) {
+		return false
+	}
+	if s.inFlight == nil {
+		s.inFlight = make(map[string]bool)
+	}
+	s.inFlight[id] = true
+	return true
+}
+
+func (s *Scheduler) finishProbe(id string) {
+	s.backoffMu.Lock()
+	delete(s.inFlight, id)
+	s.backoffMu.Unlock()
+}
+
+func (s *Scheduler) failProbe(id, outcome string) {
+	s.Reg.MarkProbeFailure(id, outcome)
+	if outcome == "canceled" {
+		return
+	}
+	s.backoffMu.Lock()
+	state := s.backoffs[id]
+	if state.delay == 0 {
+		state.delay = baseProbeBackoff
+	} else {
+		state.delay = min(state.delay*2, maxProbeBackoff)
+	}
+	state.nextAt = time.Now().Add(state.delay)
+	if s.backoffs == nil {
+		s.backoffs = make(map[string]probeBackoff)
+	}
+	s.backoffs[id] = state
+	s.backoffMu.Unlock()
+	s.Health.RouteFailure(id, 0)
+}
+
 func (s *Scheduler) probeOnce(ctx context.Context, t Target, prov provider.Provider) {
-	// Queueing behind a busy provider is not evidence that this route timed out.
-	// Keep the short slot wait separate from the upstream measurement deadline.
+	id := string(t.Route.ID)
+	if ctx.Err() != nil || !s.claimProbe(id, time.Now()) {
+		return
+	}
+	defer s.finishProbe(id)
+	// Slot contention is not an upstream failure and does not begin a probe.
 	slotCtx, cancelSlot := context.WithTimeout(ctx, 2*time.Second)
 	release, err := s.Health.AcquireSlot(slotCtx, t.Route.Provider)
 	cancelSlot()
@@ -201,9 +265,24 @@ func (s *Scheduler) probeOnce(ctx context.Context, t Target, prov provider.Provi
 		return
 	}
 	defer release()
+	if ctx.Err() != nil {
+		return
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-
+	s.Reg.BeginProbe(id)
+	failed := func(err error) {
+		outcome := "error"
+		switch {
+		case ctx.Err() != nil:
+			outcome = "canceled"
+		case probeCtx.Err() == context.DeadlineExceeded || errors.Is(err, context.DeadlineExceeded):
+			outcome = "timeout"
+		case errors.Is(err, io.EOF):
+			outcome = "no_semantic"
+		}
+		s.failProbe(id, outcome)
+	}
 	req := provider.NormalizedRequest{
 		Messages:  []provider.Message{{Role: "user", Content: "ping"}},
 		MaxTokens: 1,
@@ -212,33 +291,35 @@ func (s *Scheduler) probeOnce(ctx context.Context, t Target, prov provider.Provi
 	timer := latency.Start()
 	stream, err := prov.ChatCompletion(probeCtx, t.Route, req)
 	if err != nil {
-		if ctx.Err() == nil {
-			s.Health.RouteFailure(string(t.Route.ID), 0)
-		}
+		failed(err)
 		return
 	}
 	defer stream.Close()
-
-	recorded := false
 	for {
 		ev, err := stream.Next(probeCtx)
 		if err != nil {
-			if !recorded && ctx.Err() == nil {
-				s.Health.RouteFailure(string(t.Route.ID), 0)
+			failed(err)
+			return
+		}
+		// A finish-only event is not a token. Text, reasoning and tool deltas
+		// all qualify; do not drain a stream after the first measured delta.
+		if ev.DeltaText != "" || ev.ReasoningContent != "" || len(ev.ToolCalls) > 0 {
+			if d, ok := timer.OnSemanticEvent(); ok {
+				// Zero means unknown in the registry. A measured delta below
+				// clock resolution needs a positive sentinel, not claimed precision.
+				if d == 0 {
+					d = time.Nanosecond
+				}
+				s.Reg.RecordProbe(id, float64(d)/float64(time.Millisecond))
+				s.backoffMu.Lock()
+				delete(s.backoffs, id)
+				s.backoffMu.Unlock()
+				s.Health.RouteSuccess(id)
 			}
 			return
 		}
-		if ev.Semantic() {
-			if d, ok := timer.OnSemanticEvent(); ok {
-				s.Reg.RecordProbe(string(t.Route.ID), float64(d.Milliseconds()))
-				recorded = true
-				s.Health.RouteSuccess(string(t.Route.ID))
-			}
-		}
 		if ev.FinishReason != "" {
-			if !recorded && ctx.Err() == nil {
-				s.Health.RouteFailure(string(t.Route.ID), 0)
-			}
+			failed(io.EOF)
 			return
 		}
 	}

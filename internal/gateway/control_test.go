@@ -70,3 +70,73 @@ func TestControlSnapshotAndOptimisticPoolMutations(t *testing.T) {
 		t.Fatalf("auto select mode = %q", g.ControlSnapshot().Pool.Mode)
 	}
 }
+
+func TestControlSnapshotSeparatesFreshAndHistoricalTTFT(t *testing.T) {
+	p := &fallbackProvider{models: []string{"a"}}
+	p.behavior = func(context.Context, model.ProviderRoute, provider.NormalizedRequest) (provider.ChatStream, error) {
+		return nil, errors.New("not used")
+	}
+	g, err := NewGateway(context.Background(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := g.ControlSnapshot()
+	if len(snapshot.Models) != 1 || len(snapshot.Models[0].Routes) != 1 {
+		t.Fatalf("unexpected snapshot shape: %+v", snapshot)
+	}
+	routeID := string(snapshot.Models[0].Routes[0].ID)
+
+	// A fresh probe sample is the routing value and the historical value.
+	g.latency.RecordProbe(routeID, 120)
+	view := g.ControlSnapshot().Models[0].Routes[0]
+	if !view.TTFTKnown || view.TTFTMs != 120 || view.LastKnownTTFTMs != 120 || !view.TTFTKnownEver || view.TTFTSource != "probe" || view.ProbeOutcome != "success" {
+		t.Fatalf("fresh view = %+v", view)
+	}
+
+	// After the routing window the historical value remains display-only.
+	// Age the probe timestamp directly to bypass wall-clock waits.
+	g.latency.AgeProbe(routeID, 2*routingTTFTMaxAge)
+	view = g.ControlSnapshot().Models[0].Routes[0]
+	if view.TTFTKnown || view.TTFTMs != 0 {
+		t.Fatalf("expired sample still routed: %+v", view)
+	}
+	if !view.TTFTKnownEver || view.LastKnownTTFTMs != 120 || view.TTFTMeasuredAt.IsZero() || view.TTFTSource != "probe" {
+		t.Fatalf("historical view = %+v", view)
+	}
+
+	// A failed probe attempt records diagnostics without touching the sample.
+	g.latency.MarkProbeFailure(routeID, "timeout")
+	view = g.ControlSnapshot().Models[0].Routes[0]
+	if view.ProbeOutcome != "timeout" || !view.TTFTKnownEver || view.LastKnownTTFTMs != 120 {
+		t.Fatalf("failure view = %+v", view)
+	}
+
+	// A fresh request sample takes precedence for routing and history.
+	g.latency.RecordRequest(routeID, 250, 400)
+	view = g.ControlSnapshot().Models[0].Routes[0]
+	if !view.TTFTKnown || view.TTFTMs != 250 || view.TTFTSource != "request" || view.LastKnownTTFTMs != 250 {
+		t.Fatalf("request view = %+v", view)
+	}
+}
+
+func TestControlSnapshotNeverMarksExpiredFresh(t *testing.T) {
+	p := &fallbackProvider{models: []string{"a"}}
+	p.behavior = func(context.Context, model.ProviderRoute, provider.NormalizedRequest) (provider.ChatStream, error) {
+		return nil, errors.New("not used")
+	}
+	g, err := NewGateway(context.Background(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := g.ControlSnapshot()
+	routeID := string(snapshot.Models[0].Routes[0].ID)
+	g.latency.RecordProbe(routeID, 99)
+	g.latency.AgeProbe(routeID, 2*routingTTFTMaxAge)
+	view := g.ControlSnapshot().Models[0].Routes[0]
+	if view.TTFTKnown || view.TTFTMs != 0 || !view.TTFTKnownEver || view.LastKnownTTFTMs != 99 || view.TTFTMeasuredAt.IsZero() {
+		t.Fatalf("expired probe view = %+v", view)
+	}
+	if view.LatencyReason != "stale" {
+		t.Fatalf("latency reason = %q", view.LatencyReason)
+	}
+}

@@ -4,8 +4,11 @@ package openaicompat
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/konor123/Free-Model-Router/internal/model"
@@ -34,7 +37,42 @@ func New(id, baseURL string, resolve ResolveCredential) (*Provider, error) {
 		return nil, fmt.Errorf("base URL must not be empty")
 	}
 	client := &http.Client{Transport: bearerTransport{base: http.DefaultTransport, resolve: resolve}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	return &Provider{id: id, backend: &opencode.Provider{BaseURL: strings.TrimRight(baseURL, "/"), HTTP: client}}, nil
+	backend := &opencode.Provider{BaseURL: strings.TrimRight(baseURL, "/"), HTTP: client}
+	if isOpenRouterBaseURL(baseURL) {
+		backend = opencode.New(baseURL, opencode.WithCatalogFilter(openRouterFreeModel))
+		backend.HTTP = client
+	}
+	return &Provider{id: id, backend: backend}, nil
+}
+
+func isOpenRouterBaseURL(baseURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	return err == nil && strings.EqualFold(parsed.Hostname(), "openrouter.ai")
+}
+
+func openRouterFreeModel(id string, pricing map[string]json.RawMessage) bool {
+	lowerID := strings.ToLower(strings.TrimSpace(id))
+	if lowerID == "openrouter/free" || strings.HasSuffix(lowerID, ":free") {
+		return true
+	}
+	if len(pricing) == 0 {
+		return false
+	}
+	for _, raw := range pricing {
+		var text string
+		if err := json.Unmarshal(raw, &text); err == nil {
+			value, err := strconv.ParseFloat(text, 64)
+			if err != nil || value != 0 {
+				return false
+			}
+			continue
+		}
+		var value float64
+		if err := json.Unmarshal(raw, &value); err != nil || value != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // DiscoverModels remaps the backend's fixed opencode namespace to the stable

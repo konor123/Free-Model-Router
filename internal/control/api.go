@@ -90,29 +90,36 @@ type ProviderResponse struct {
 
 // RouteResponse is a safe route detail with no credentials.
 type RouteResponse struct {
-	ID                   string              `json:"id"`
-	ModelID              string              `json:"modelId"`
-	Provider             string              `json:"provider"`
-	UpstreamModelID      string              `json:"upstreamModelId"`
-	CredentialID         string              `json:"credentialId,omitempty"`
-	Access               model.AccessClass   `json:"access"`
-	Enabled              bool                `json:"enabled"`
-	AutoRouteAllowed     bool                `json:"autoRouteAllowed"`
-	ProbeAllowed         bool                `json:"probeAllowed"`
-	Capabilities         model.Capabilities  `json:"capabilities"`
-	Health               RouteHealthResponse `json:"health"`
-	TTFTMs               float64             `json:"ttftMs,omitempty"`
-	TTFTKnown            bool                `json:"ttftKnown"`
-	Performance          float64             `json:"performance,omitempty"`
-	PerformanceKnown     bool                `json:"performanceKnown"`
-	EffectivePerformance float64             `json:"effectivePerformance,omitempty"`
-	Confidence           float64             `json:"confidence,omitempty"`
-	LatencyScore         float64             `json:"latencyScore,omitempty"`
-	RoutingScore         float64             `json:"routingScore,omitempty"`
-	RoutingScoreKnown    bool                `json:"routingScoreKnown"`
-	PerformanceReason    string              `json:"performanceReason,omitempty"`
-	LatencyReason        string              `json:"latencyReason,omitempty"`
-	ScoreReason          string              `json:"scoreReason,omitempty"`
+	ID               string              `json:"id"`
+	ModelID          string              `json:"modelId"`
+	Provider         string              `json:"provider"`
+	UpstreamModelID  string              `json:"upstreamModelId"`
+	CredentialID     string              `json:"credentialId,omitempty"`
+	Access           model.AccessClass   `json:"access"`
+	Enabled          bool                `json:"enabled"`
+	AutoRouteAllowed bool                `json:"autoRouteAllowed"`
+	ProbeAllowed     bool                `json:"probeAllowed"`
+	Capabilities     model.Capabilities  `json:"capabilities"`
+	Health           RouteHealthResponse `json:"health"`
+	TTFTMs           float64             `json:"ttftMs,omitempty"`
+	TTFTKnown        bool                `json:"ttftKnown"`
+	// Historical sample for display only; never feeds routing or scores.
+	LastKnownTTFTMs      float64 `json:"lastKnownTTFTMs,omitempty"`
+	TTFTKnownEver        bool    `json:"ttftKnownEver"`
+	TTFTMeasuredAt       string  `json:"ttftMeasuredAt,omitempty"`
+	TTFTSource           string  `json:"ttftSource,omitempty"`
+	ProbeOutcome         string  `json:"probeOutcome,omitempty"`
+	ProbeAttemptAt       string  `json:"probeAttemptAt,omitempty"`
+	Performance          float64 `json:"performance,omitempty"`
+	PerformanceKnown     bool    `json:"performanceKnown"`
+	EffectivePerformance float64 `json:"effectivePerformance,omitempty"`
+	Confidence           float64 `json:"confidence,omitempty"`
+	LatencyScore         float64 `json:"latencyScore,omitempty"`
+	RoutingScore         float64 `json:"routingScore,omitempty"`
+	RoutingScoreKnown    bool    `json:"routingScoreKnown"`
+	PerformanceReason    string  `json:"performanceReason,omitempty"`
+	LatencyReason        string  `json:"latencyReason,omitempty"`
+	ScoreReason          string  `json:"scoreReason,omitempty"`
 }
 
 // RouteHealthResponse is the JSON-safe health status for one route.

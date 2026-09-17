@@ -5,6 +5,46 @@ import (
 	"time"
 )
 
+func TestSnapshotExpiryFailureAndRecovery(t *testing.T) {
+	r := NewRegistry()
+	r.RecordProbe("route", 500)
+	first := r.Snapshot("route", time.Now(), 90*time.Second)
+	if !first.Fresh || first.ValueMs != 500 || first.Source != "probe" {
+		t.Fatalf("first: %+v", first)
+	}
+	atExpiry := first.MeasuredAt.Add(90 * time.Second)
+	if !r.Snapshot("route", atExpiry, 90*time.Second).Fresh {
+		t.Fatal("boundary must be fresh")
+	}
+	r.MarkProbeFailure("route", "timeout")
+	stale := r.Snapshot("route", atExpiry.Add(time.Nanosecond), 90*time.Second)
+	if stale.Fresh || !stale.Known || stale.ValueMs != 500 || stale.MeasuredAt != first.MeasuredAt || stale.ProbeOutcome != "timeout" {
+		t.Fatalf("stale: %+v", stale)
+	}
+	r.RecordProbe("route", 100)
+	recovered := r.Snapshot("route", time.Now(), 90*time.Second)
+	if !recovered.Fresh || recovered.ProbeOutcome != "success" || recovered.ValueMs != 400 {
+		t.Fatalf("recovered: %+v", recovered)
+	}
+}
+
+func TestSnapshotUnknownAndMatchingRequestTimestamp(t *testing.T) {
+	r := NewRegistry()
+	if r.Snapshot("missing", time.Now(), 90*time.Second).Known {
+		t.Fatal("invented measurement")
+	}
+	r.RecordProbe("route", 500)
+	s := r.For("route")
+	s.mu.Lock()
+	s.LastProbeAt = time.Now().Add(-5 * time.Minute)
+	s.mu.Unlock()
+	r.RecordRequest("route", 50, 100)
+	view := r.Snapshot("route", time.Now(), 90*time.Second)
+	if !view.Fresh || view.ValueMs != 50 || view.Source != "request" || view.MeasuredAt != s.LastRequestAt {
+		t.Fatalf("view: %+v", view)
+	}
+}
+
 func TestEWMAFirstSampleWins(t *testing.T) {
 	e := New()
 	e.Add(100)
