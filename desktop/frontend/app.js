@@ -11,7 +11,7 @@ const state = {
 // Provider credentials are deliberately not placed in state: test hooks expose state
 // and a periodic render must never write a replacement secret back into HTML.
 const providerSecretChanges = new Map();
-if (window.__FMR_TEST__) Object.assign(window.__FMR_TEST__, { state, visibleModels: () => visibleModels(), visibleLogs: () => visibleLogs(), modelMetric: (model, key) => modelMetric(model, key), modelRows, acceptServerConfig, collectProviders: () => collectProviders(), providerCards, updateSelection });
+if (window.__FMR_TEST__) Object.assign(window.__FMR_TEST__, { state, visibleModels: () => visibleModels(), visibleLogs: () => visibleLogs(), modelMetric: (model, key) => modelMetric(model, key), modelRows, acceptServerConfig, collectProviders: () => collectProviders(), providerCards, updateSelection, staleTTFT, staleTTFTBadge });
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>\"']/g, (character) => ({
@@ -134,6 +134,27 @@ function knownMetric(value, known) {
   return known && Number.isFinite(value) ? value : null;
 }
 
+// StaleTTFT highlights a historical measurement kept for display only. The
+// value never feeds routing or scores; the UI must say so explicitly.
+function staleTTFT(route) {
+  if (!route || route.ttftKnown || !route.ttftKnownEver) return null;
+  if (!Number.isFinite(route.lastKnownTTFTMs) || route.lastKnownTTFTMs <= 0) return null;
+  return {
+    ms: route.lastKnownTTFTMs,
+    source: route.ttftSource || "",
+    measuredAt: route.ttftMeasuredAt || "",
+    outcome: route.probeOutcome || "",
+    reason: route.latencyReason || "stale",
+  };
+}
+
+function staleTTFTBadge(stale) {
+  if (!stale) return "";
+  const age = stale.measuredAt ? ` · measured ${new Date(stale.measuredAt).toISOString()}` : "";
+  const detail = [stale.outcome && `probe: ${stale.outcome}`, stale.reason, stale.source && `source: ${stale.source}`].filter(Boolean).join(", ");
+  return ` <span class="badge stale" title="Stale TTFT (display only, not routed)${detail ? ` — ${escapeHtml(detail)}` : ""}${escapeHtml(age)}">~${Math.round(stale.ms)}ms stale</span>`;
+}
+
 function modelMetric(model, key) {
   const route = representativeRoute(model);
   if (key === "performance") return knownMetric(route?.effectivePerformance, route?.performanceKnown);
@@ -178,13 +199,18 @@ function visibleModels() {
 function modelRows() {
   const models = visibleModels();
   return models.map((model) => {
-    const routes = (model.routes || []).map((route) => `<span class="badge ${route.enabled && route.health?.available ? "good" : "warn"}">${escapeHtml(route.provider)} · ${escapeHtml(route.access)}${route.ttftKnown ? ` · ${Math.round(route.ttftMs)}ms` : ""}</span>`).join("");
+    const routes = (model.routes || []).map((route) => `<span class="badge ${route.enabled && route.health?.available ? "good" : "warn"}">${escapeHtml(route.provider)} · ${escapeHtml(route.access)}${route.ttftKnown ? ` · ${Math.round(route.ttftMs)}ms` : staleTTFTBadge(staleTTFT(route))}</span>`).join("");
     const route = representativeRoute(model);
     const performance = modelMetric(model, "performance");
     const latency = modelMetric(model, "latency");
     const score = modelMetric(model, "score");
     const performanceTitle = route?.performanceKnown ? "OpenEvals benchmark" : (route?.performanceReason || "Performance unavailable");
-    const latencyTitle = route?.ttftKnown ? `${Math.round(route.ttftMs)} ms TTFT` : (route?.latencyReason || "No TTFT measurement");
+    const stale = staleTTFT(route);
+    const latencyTitle = route?.ttftKnown
+      ? `${Math.round(route.ttftMs)} ms TTFT`
+      : stale
+        ? `Stale TTFT ${Math.round(stale.ms)} ms (display only, not routed)${stale.measuredAt ? ` — measured ${new Date(stale.measuredAt).toISOString()}` : ""}`
+        : (route?.latencyReason || "No TTFT measurement");
     const scoreTitle = model.routingScoreKnown ? "Current routing score" : (route?.scoreReason || "Routing score unavailable");
     return `<tr><td><label class="checkbox"><input type="checkbox" data-model-id="${escapeHtml(model.id)}" ${model.selected ? "checked" : ""} /> <code>${escapeHtml(model.id)}</code></label></td><td>${escapeHtml(model.displayName)}</td><td>${routes || "<span class=\"muted\">none</span>"}</td><td title="${escapeHtml(performanceTitle)}">${performance === null ? "-" : performance.toFixed(1)}</td><td title="${escapeHtml(latencyTitle)}">${latency === null ? "-" : latency.toFixed(1)}</td><td><button class="secondary" data-pin-id="${escapeHtml(model.id)}">${model.pinned ? "Unpin" : "Pin"}</button></td><td title="${escapeHtml(scoreTitle)}">${score === null ? "-" : score.toFixed(1)}</td></tr>`;
   }).join("");

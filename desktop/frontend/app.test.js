@@ -292,3 +292,35 @@ test("unknown metrics render deterministic diagnostic reasons", () => {
   assert.match(rows, /title="no_sample">-/);
   assert.match(rows, /title="no_performance_and_latency">-/);
 });
+
+test("stale TTFT renders a display-only badge without claiming freshness", () => {
+  const document = createDocument();
+  const source = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
+  const hooks = {};
+  vm.runInNewContext(source, { console, document, URLSearchParams, setInterval() {}, window: { __FMR_TEST__: hooks, __TAURI__: { core: { invoke: async () => ({ data: [] }) } }, location: { search: "" } } }, { filename: "app.js" });
+
+  // A historical probe sample is labeled stale and never rendered as fresh.
+  const staleRoute = { provider: "custom", access: "free", enabled: true, ttftKnown: false, ttftKnownEver: true, lastKnownTTFTMs: 250.4, ttftSource: "probe", ttftMeasuredAt: "2026-09-17T05:00:00Z", probeOutcome: "success", latencyReason: "stale" };
+  const stale = hooks.staleTTFT(staleRoute);
+  assert.ok(stale, "historical sample should be detected as stale");
+  assert.equal(stale.ms, 250.4);
+  assert.equal(stale.source, "probe");
+  assert.equal(stale.outcome, "success");
+
+  const badge = hooks.staleTTFTBadge(stale);
+  assert.match(badge, /~250ms stale/);
+  assert.match(badge, /measured 2026-09-17T05:00:00\.000Z/);
+  assert.match(badge, /not routed/);
+
+  // The badge replaces the plain route suffix, keeping "good/warn" untouched.
+  hooks.state.models = [{ id: "custom/model", displayName: "Model", selected: true, routes: [staleRoute] }];
+  const rows = hooks.modelRows();
+  assert.match(rows, /~250ms stale/);
+  assert.doesNotMatch(rows, /· 250ms/);
+
+  // Fresh samples still win over history and unknowns stay silent.
+  assert.equal(hooks.staleTTFT({ ttftKnown: true, ttftMs: 100, ttftKnownEver: true, lastKnownTTFTMs: 250 }), null);
+  assert.equal(hooks.staleTTFT({ ttftKnown: false, ttftKnownEver: false, latencyReason: "no_sample" }), null);
+  assert.equal(hooks.staleTTFT({ ttftKnown: false, ttftKnownEver: true, lastKnownTTFTMs: 0 }), null);
+  assert.equal(hooks.staleTTFTBadge(null), "");
+});
