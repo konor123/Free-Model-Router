@@ -111,6 +111,7 @@ func RunWithProvider(ctx context.Context, cfg *config.Config, log *logging.Logge
 	} else {
 		log.Warn("resolve OpenEvals cache path: %v", pathErr)
 	}
+	startCatalogRefresh(runCtx, gw, log)
 
 	managementBind := strings.TrimSpace(cfg.ManagementBind)
 	controlEnabled := managementBind != "" || cfg.SourcePath != ""
